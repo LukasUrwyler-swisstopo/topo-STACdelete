@@ -32,9 +32,14 @@ COLLECTION_ID = "ch.swisstopo.spezialbefliegungen"
 # _probe_large_asset/check_asset_info.
 LARGE_ASSET_THRESHOLD_BYTES = 50 * 1024 ** 3
 
+# STAC API v1 (STAC 1.0.0). Pfadsegment ist "v1", nicht "v1.0" (liefert 404);
+# v0.9 ist abgekündigt. Der abschliessende "/" ist Pflicht: urljoin() ersetzt
+# sonst das letzte Segment und die Requests gingen an /api/stac/collections/...
+# Umbenannte Asset-Felder (eo:gsd -> gsd, checksum:multihash -> file:checksum)
+# werden von diesem Tool nicht ausgewertet.
 ENVIRONMENTS = {
-    "INT":  "https://sys-data.int.bgdi.ch/api/stac/v0.9/",
-    "PROD": "https://data.geo.admin.ch/api/stac/v0.9/",
+    "INT":  "https://sys-data.int.bgdi.ch/api/stac/v1/",
+    "PROD": "https://data.geo.admin.ch/api/stac/v1/",
 }
 
 # Hash-Routing-Basis des STAC-Browsers je Umgebung (für Kunden-Weitergabe).

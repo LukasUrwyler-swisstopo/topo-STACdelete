@@ -17,7 +17,7 @@ from api.stac_api import (
     COLLECTION_ID, ENVIRONMENTS, AUFTRAGSTYPEN, EXT_PRESETS,
     get_item_direct, get_collection_items,
     delete_asset, delete_item,
-    check_asset_info,
+    check_asset_info, browser_url,
     stac_item_year, stac_item_area,
 )
 from api.gdwh_api import (
@@ -35,7 +35,7 @@ from api.gdwh_api import (
 )
 
 AUTH      = ("testuser", "testpass")
-BASE      = "https://sys-data.int.bgdi.ch/api/stac/v0.9/"
+BASE      = "https://sys-data.int.bgdi.ch/api/stac/v1/"
 GDWH_BASE = "https://ltgdwhi.adr.admin.ch/gdwh-api/v2/"
 
 
@@ -80,6 +80,23 @@ class TestKonstanten:
     def test_environments_schluessel(self):
         assert "INT"  in ENVIRONMENTS
         assert "PROD" in ENVIRONMENTS
+
+    @pytest.mark.parametrize("env", ["INT", "PROD"])
+    def test_environments_auf_stac_v1(self, env):
+        """Migration v0.9 -> v1: Segment heisst "v1" (nicht "v1.0" = 404) und
+        muss mit "/" enden, sonst verwirft urljoin() die Version."""
+        url = ENVIRONMENTS[env]
+        assert url.endswith("/api/stac/v1/")
+        assert "v0.9" not in url and "v1.0" not in url
+
+    @pytest.mark.parametrize("env, host", [
+        ("INT",  "https://sys-data.int.bgdi.ch/"),
+        ("PROD", "https://data.geo.admin.ch/"),
+    ])
+    def test_browser_url_item(self, env, host):
+        url = browser_url(env, "kry-2015-08-05t09230000")
+        assert url.startswith(host)
+        assert f"#/collections/{COLLECTION_ID}/items/kry-2015-08-05t09230000" in url
 
     def test_gdwh_environments_schluessel(self):
         assert "INT"  in GDWH_ENVIRONMENTS
@@ -205,6 +222,36 @@ class TestGetItemDirect:
         url = mock_get.call_args[0][0]
         assert f"collections/{COLLECTION_ID}/items/item-abc" in url
 
+    @pytest.mark.parametrize("env", ["INT", "PROD"])
+    def test_url_exakt_v1(self, env):
+        with patch("api.stac_api._session_get",
+                   return_value=_mock_response(200, self.ITEM)) as mock_get:
+            get_item_direct(ENVIRONMENTS[env], AUTH, "item-abc")
+        assert mock_get.call_args[0][0] == (
+            f"{ENVIRONMENTS[env]}collections/{COLLECTION_ID}/items/item-abc")
+
+    def test_v1_asset_felder_stoeren_nicht(self):
+        """Echte v1-Asset-Struktur (live von PROD, 2026-09-23): gsd statt
+        eo:gsd, file:checksum statt checksum:multihash, teils in Grossschreibung.
+        Das Tool wertet diese Felder nicht aus – Area-Erkennung bleibt stabil."""
+        item = {
+            "id": "kry-2015-08-05t09230000",
+            "stac_version": "1.0.0",
+            "properties": {"datetime": "2015-08-05T09:23:00Z"},
+            "assets": {"kry-2015-08-05t09230000-dsm-hillshade.tif": {
+                "title": "DSM-HILLSHADE",
+                "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                "href": "https://data.geo.admin.ch/ch.swisstopo.spezialbefliegungen/"
+                        "kry-2015-08-05t09230000/kry-2015-08-05t09230000-dsm-hillshade.tif",
+                "description": "Area: RANDA, TerrainModel: DSM",
+                "gsd": 1.0,
+                "proj:epsg": 2056,
+                "file:checksum": "1220F2C0F083C8BD36F9974E9663017A43B3ABEFEE0B7C318F52D2501D39F7E2C165",
+            }},
+        }
+        assert stac_item_area(item) == "RANDA"
+        assert stac_item_year(item) == "2015"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # get_collection_items
@@ -252,6 +299,25 @@ class TestGetCollectionItems:
         assert len(log_calls) == 1
         assert "Paginierung" in log_calls[0]
 
+    def test_paginierung_v1_cursor_link(self):
+        """v1 liefert den next-Link mit cursor+limit bereits im href (live
+        verifiziert). Er muss unverändert und ohne zusätzliche params folgen,
+        sonst würde limit doppelt gesetzt bzw. der Cursor verloren gehen."""
+        next_href = (f"{BASE}collections/{COLLECTION_ID}/items"
+                     "?cursor=cD1rcnktMjAxOC0wOS0xMXQxMTM0MDAwMA%3D%3D&limit=1000")
+        page1 = {"features": [{"id": "item-1"}],
+                 "links": [{"rel": "next", "href": next_href}]}
+        page2 = {"features": [{"id": "item-2"}], "links": []}
+        responses = iter([_mock_response(200, page1), _mock_response(200, page2)])
+        with patch("api.stac_api._session_get",
+                   side_effect=lambda *a, **kw: next(responses)) as mock_get:
+            result = get_collection_items(BASE, AUTH, log_fn=lambda _m: None)
+        assert [it["id"] for it in result] == ["item-1", "item-2"]
+        first, second = mock_get.call_args_list
+        assert first.args[0] == f"{BASE}collections/{COLLECTION_ID}/items"
+        assert second.args[0] == next_href
+        assert second.args[2] is None
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # delete_asset
@@ -298,6 +364,17 @@ class TestDeleteAsset:
         url = mock_del.call_args[0][0]
         assert f"collections/{COLLECTION_ID}/items/item-abc/assets/my_asset_key" in url
 
+    @pytest.mark.parametrize("env", ["INT", "PROD"])
+    def test_url_exakt_v1(self, env):
+        """DELETE muss exakt an den v1-Endpunkt gehen – ein 'in'-Vergleich
+        würde einen durch urljoin() verlorenen Versions-Pfad nicht bemerken."""
+        with patch("api.stac_api._session_delete",
+                   return_value=_mock_response(204)) as mock_del:
+            delete_asset(ENVIRONMENTS[env], AUTH, "item-abc", "my_asset_key")
+        assert mock_del.call_args[0][0] == (
+            f"{ENVIRONMENTS[env]}collections/{COLLECTION_ID}"
+            "/items/item-abc/assets/my_asset_key")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # delete_item
@@ -329,6 +406,14 @@ class TestDeleteItem:
         url = mock_del.call_args[0][0]
         assert f"collections/{COLLECTION_ID}/items/item-xyz" in url
         assert "/assets/" not in url
+
+    @pytest.mark.parametrize("env", ["INT", "PROD"])
+    def test_url_exakt_v1(self, env):
+        with patch("api.stac_api._session_delete",
+                   return_value=_mock_response(204)) as mock_del:
+            delete_item(ENVIRONMENTS[env], AUTH, "item-xyz")
+        assert mock_del.call_args[0][0] == (
+            f"{ENVIRONMENTS[env]}collections/{COLLECTION_ID}/items/item-xyz")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
