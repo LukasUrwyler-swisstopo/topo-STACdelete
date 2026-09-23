@@ -1368,7 +1368,7 @@ class KryDeleteApp(tk.Tk):
             self.after(0, self._apply_filters)
         except Exception as exc:
             self._log_write(f"[FEHLER] {exc}\n")
-            self.after(0, lambda: messagebox.showerror("Fehler", str(exc)))
+            self.after(0, lambda msg=str(exc): messagebox.showerror("Fehler", msg))
         finally:
             self.after(0, lambda: self._set_busy(False))
 
@@ -2346,7 +2346,7 @@ class KryDeleteApp(tk.Tk):
                 self.after(50, lambda: self._gdwh_show_pending_notice(pending_count))
         except Exception as exc:
             self._gdwh_log_write(f"[FEHLER] {exc}\n")
-            self.after(0, lambda: messagebox.showerror("GDWH Fehler", str(exc)))
+            self.after(0, lambda msg=str(exc): messagebox.showerror("GDWH Fehler", msg))
             self.after(0, lambda: self._gdwh_fetch_btn.config(state="normal"))
             self.after(0, lambda: self._gdwh_preview_lbl.configure(
                 text="Fehler beim Laden."))
