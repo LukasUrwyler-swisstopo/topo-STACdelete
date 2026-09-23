@@ -16,7 +16,7 @@ import requests as req_module
 from api.stac_api import (
     COLLECTION_ID, ENVIRONMENTS, AUFTRAGSTYPEN, EXT_PRESETS,
     get_item_direct, get_collection_items,
-    delete_asset, delete_item,
+    delete_asset, delete_item, abort_asset_upload, _write_base,
     check_asset_info, browser_url,
     stac_item_year, stac_item_area,
 )
@@ -365,14 +365,15 @@ class TestDeleteAsset:
         assert f"collections/{COLLECTION_ID}/items/item-abc/assets/my_asset_key" in url
 
     @pytest.mark.parametrize("env", ["INT", "PROD"])
-    def test_url_exakt_v1(self, env):
-        """DELETE muss exakt an den v1-Endpunkt gehen – ein 'in'-Vergleich
-        würde einen durch urljoin() verlorenen Versions-Pfad nicht bemerken."""
+    def test_url_exakt_v09(self, env):
+        """DELETE muss exakt an den v0.9-Endpunkt gehen (v1 ignoriert Basic
+        Auth) – ein 'in'-Vergleich würde einen durch urljoin() verlorenen
+        Versions-Pfad nicht bemerken."""
         with patch("api.stac_api._session_delete",
                    return_value=_mock_response(204)) as mock_del:
             delete_asset(ENVIRONMENTS[env], AUTH, "item-abc", "my_asset_key")
         assert mock_del.call_args[0][0] == (
-            f"{ENVIRONMENTS[env]}collections/{COLLECTION_ID}"
+            f"{_write_base(ENVIRONMENTS[env])}collections/{COLLECTION_ID}"
             "/items/item-abc/assets/my_asset_key")
 
 
@@ -408,12 +409,46 @@ class TestDeleteItem:
         assert "/assets/" not in url
 
     @pytest.mark.parametrize("env", ["INT", "PROD"])
-    def test_url_exakt_v1(self, env):
+    def test_url_exakt_v09(self, env):
         with patch("api.stac_api._session_delete",
                    return_value=_mock_response(204)) as mock_del:
             delete_item(ENVIRONMENTS[env], AUTH, "item-xyz")
         assert mock_del.call_args[0][0] == (
-            f"{ENVIRONMENTS[env]}collections/{COLLECTION_ID}/items/item-xyz")
+            f"{_write_base(ENVIRONMENTS[env])}collections/{COLLECTION_ID}/items/item-xyz")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _write_base / abort_asset_upload – Überbrückung: Schreiben über v0.9
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestWriteBase:
+
+    @pytest.mark.parametrize("env, expected", [
+        ("INT",  "https://sys-data.int.bgdi.ch/api/stac/v0.9/"),
+        ("PROD", "https://data.geo.admin.ch/api/stac/v0.9/"),
+    ])
+    def test_v1_wird_zu_v09(self, env, expected):
+        assert _write_base(ENVIRONMENTS[env]) == expected
+
+    def test_unerwartete_url_wirft_fehler(self):
+        """Ohne v1-Segment lieber abbrechen als an eine falsche URL löschen."""
+        with pytest.raises(ValueError):
+            _write_base("https://data.geo.admin.ch/api/stac/v2/")
+
+    def test_abort_geht_an_v09(self):
+        with patch("api.stac_api._session_post",
+                   return_value=_mock_response(200, json_data={"status": "aborted"})) as mock_post:
+            ok, _, _ = abort_asset_upload(ENVIRONMENTS["PROD"], AUTH, "item-a", "asset-b", "up-1")
+        assert ok is True
+        assert mock_post.call_args[0][0] == (
+            f"https://data.geo.admin.ch/api/stac/v0.9/collections/{COLLECTION_ID}"
+            "/items/item-a/assets/asset-b/uploads/up-1/abort")
+
+    def test_lesen_bleibt_auf_v1(self):
+        with patch("api.stac_api._session_get",
+                   return_value=_mock_response(200, json_data={"id": "item-a"})) as mock_get:
+            get_item_direct(ENVIRONMENTS["PROD"], AUTH, "item-a")
+        assert "/api/stac/v1/" in mock_get.call_args[0][0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

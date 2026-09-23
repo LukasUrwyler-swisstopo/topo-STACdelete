@@ -42,6 +42,25 @@ ENVIRONMENTS = {
     "PROD": "https://data.geo.admin.ch/api/stac/v1/",
 }
 
+# ÜBERBRÜCKUNG: v1 akzeptiert kein Basic Auth mehr, nur noch JWT via AWS
+# Cognito (https://docs.geo.admin.ch/download-data/stac-api/authentication.html:
+# "Basic authentication and token authentication were removed in STAC API
+# version v1"). Basic-Credentials werden von v1 stillschweigend ignoriert ->
+# 401 "Authentication credentials were not provided.". v0.9 wertet Basic Auth
+# weiterhin aus (live geprüft 2026-09-23, INT+PROD) und arbeitet auf denselben
+# Daten. Deshalb laufen Schreib-Requests (DELETE, Upload-Abort) vorerst über
+# v0.9, Lese-Requests über v1. Entfernen, sobald JWT-Auth umgesetzt ist –
+# spätestens wenn v0.9 abgeschaltet wird.
+_V1_SEGMENT   = "/api/stac/v1/"
+_V09_SEGMENT  = "/api/stac/v0.9/"
+
+
+def _write_base(base_url: str) -> str:
+    """Leitet aus der v1-Basis-URL die v0.9-Basis-URL für Schreib-Requests ab."""
+    if _V1_SEGMENT not in base_url:
+        raise ValueError(f"Unerwartete STAC-Basis-URL (kein '{_V1_SEGMENT}'): {base_url}")
+    return base_url.replace(_V1_SEGMENT, _V09_SEGMENT, 1)
+
 # Hash-Routing-Basis des STAC-Browsers je Umgebung (für Kunden-Weitergabe).
 # INT läuft direkt auf der Domain-Root, PROD unter /browser/index.html.
 _BROWSER_BASE = {
@@ -168,7 +187,7 @@ def delete_asset(base_url: str, auth: Tuple,
                  item_id: str, asset_key: str) -> Tuple[bool, int, str]:
     """Löscht einen einzelnen Asset.
     Gibt (Erfolg, HTTP-Statuscode, Fehlermeldung bei Misserfolg) zurück."""
-    url = urljoin(base_url,
+    url = urljoin(_write_base(base_url),
                   f"collections/{COLLECTION_ID}/items/{item_id}/assets/{asset_key}")
     r = _session_delete(url, auth)
     ok = r.status_code in (200, 204)
@@ -178,7 +197,7 @@ def delete_asset(base_url: str, auth: Tuple,
 def delete_item(base_url: str, auth: Tuple, item_id: str) -> Tuple[bool, int, str]:
     """Löscht ein Item vollständig (nur wenn leer).
     Gibt (Erfolg, HTTP-Statuscode, Fehlermeldung bei Misserfolg) zurück."""
-    url = urljoin(base_url, f"collections/{COLLECTION_ID}/items/{item_id}")
+    url = urljoin(_write_base(base_url), f"collections/{COLLECTION_ID}/items/{item_id}")
     r = _session_delete(url, auth)
     ok = r.status_code in (200, 204)
     return ok, r.status_code, ("" if ok else _error_reason(r))
@@ -215,7 +234,7 @@ def abort_asset_upload(base_url: str, auth: Tuple, item_id: str,
     Erfolg erfordert HTTP 200 UND status=="aborted" im Body (siehe Referenz-
     skript oben). Gibt (Erfolg, HTTP-Statuscode, Fehlermeldung bei Misserfolg) zurück."""
     url = urljoin(
-        base_url,
+        _write_base(base_url),
         f"collections/{COLLECTION_ID}/items/{item_id}/assets/{asset_key}"
         f"/uploads/{upload_id}/abort")
     r = _session_post(url, auth)
