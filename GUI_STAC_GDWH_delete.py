@@ -1,5 +1,5 @@
 """
-topo-STAC_GDWH_delete.py  –  STAC / GDWH Deleting-Tool
+GUI_STAC_GDWH_delete.py  –  STAC / GDWH Deleting-Tool
 
 Tab 1 – STAC Items & Assets:
   Löscht Assets/Items aus der Collection "ch.swisstopo.spezialbefliegungen".

@@ -1,7 +1,7 @@
 """
 stac_api.py  –  STAC API Hilfsfunktionen für ch.swisstopo.spezialbefliegungen
 
-Importiert von topo-STAC_GDWH_delete.py.
+Importiert von GUI_STAC_GDWH_delete.py.
 Direkt nutzbar: python stac_api.py  (gibt Kurzinfo aus)
 """
 

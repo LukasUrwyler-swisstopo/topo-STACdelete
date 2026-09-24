@@ -6,7 +6,7 @@ Kleines GUI-Tool, um Daten gezielt aus dem **Geodata-Warehouse (GDWH)** und aus 
 
 Eingabe im cmd-Terminal:
 ```bash
-python pfad/topo-STAC_GDWH_delete.py
+python pfad/GUI_STAC_GDWH_delete.py
 ```
 <img width="713" height="676" alt="image" src="https://github.com/user-attachments/assets/6c11bb18-c7a4-4faf-8f76-7624d0f838a9" />
 
