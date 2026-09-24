@@ -5,10 +5,16 @@ Importiert von GUI_STAC_GDWH_delete.py.
 Direkt nutzbar: python stac_api.py  (gibt Kurzinfo aus)
 """
 
+import atexit
+import logging
+import os
 import re
+import ssl
+import tempfile
+import certifi
 import requests
 from urllib.parse import urljoin
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 
 # Firmenproxy für externe Verbindungen (data.geo.admin.ch / sys-data.int.bgdi.ch)
@@ -22,7 +28,41 @@ _PROXY = {
 # gibt es hier keinen Grund, die TLS-Prüfung zu deaktivieren. DELETE-Requests
 # tragen HTTP-Basic-Auth-Credentials; ohne Zertifikatsprüfung wären diese
 # gegenüber einem Man-in-the-Middle im Netzwerkpfad ungeschützt.
-STAC_SSL_VERIFY: bool = True
+#
+# Der Bundes-Proxy bricht TLS teilweise auf (SSL-Inspection) und signiert dann
+# mit der Bundes-CA neu – betrifft nicht alle Hosts gleich (INT ja, PROD nein).
+# Diese CA liegt im Windows-Zertifikatsspeicher, aber nicht im certifi-Bundle
+# von requests -> CERTIFICATE_VERIFY_FAILED. Deshalb wird ein kombiniertes
+# Bundle (certifi + Windows ROOT/CA) erzeugt, die Prüfung bleibt aktiv.
+STAC_SSL_VERIFY: Union[bool, str] = True
+
+_log = logging.getLogger(__name__)
+
+
+def _build_ca_bundle() -> Union[bool, str]:
+    """Erzeugt eine PEM-Datei aus certifi + Windows-Zertifikatsspeicher.
+    Gibt den Pfad zurück, bei Fehler/Nicht-Windows True (= nur certifi)."""
+    if not hasattr(ssl, "enum_certificates"):
+        return True
+    try:
+        pems = [open(certifi.where(), encoding="ascii").read()]
+        for store in ("ROOT", "CA"):
+            for der, enc, trust in ssl.enum_certificates(store):
+                # Nur X.509 mit Serverauth-Vertrauen (trust=True = alle Zwecke)
+                if enc == "x509_asn" and (trust is True or "1.3.6.1.5.5.7.3.1" in trust):
+                    pems.append(ssl.DER_cert_to_PEM_cert(der))
+        fd, path = tempfile.mkstemp(prefix="stac_ca_", suffix=".pem")
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write("\n".join(pems))
+        atexit.register(lambda: os.path.exists(path) and os.remove(path))
+        _log.debug("CA-Bundle erzeugt: %s (%d Zertifikate)", path, len(pems) - 1)
+        return path
+    except Exception as e:
+        _log.warning("Windows-Zertifikate nicht ladbar, nur certifi: %s", e)
+        return True
+
+
+STAC_SSL_VERIFY = _build_ca_bundle()
 
 COLLECTION_ID = "ch.swisstopo.spezialbefliegungen"
 
