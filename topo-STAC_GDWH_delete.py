@@ -1,5 +1,5 @@
 """
-GUI_deleteDATA_stac_gdwh.py  –  STAC / GDWH Deleting-Tool
+topo-STAC_GDWH_delete.py  –  STAC / GDWH Deleting-Tool
 
 Tab 1 – STAC Items & Assets:
   Löscht Assets/Items aus der Collection "ch.swisstopo.spezialbefliegungen".
@@ -597,7 +597,7 @@ class KryDeleteApp(tk.Tk):
         ttk.Entry(sec, textvariable=self._asset_filter_var, width=30).grid(
             row=4, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
         ttk.Label(
-            sec, text='Teilstring, z.B. "nrgb" oder "16bit"  —  Leer = alle Assets',
+            sec, text='Teilstring im Key oder Dateinamen, z.B. "nrgb" oder "16bit"  —  Leer = alle Assets',
             font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
         ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(6, 0))
 
@@ -613,14 +613,6 @@ class KryDeleteApp(tk.Tk):
             self._ext_vars.append((var, exts))
             ttk.Checkbutton(ext_frame, text=label, variable=var).pack(
                 side="left", padx=(0, 10))
-
-        ttk.Label(ext_frame, text="Frei:").pack(side="left", padx=(6, 4))
-        self._ext_custom_var = tk.StringVar()
-        self._ext_custom_var.trace_add("write", lambda *_: self._apply_filters())
-        ttk.Entry(ext_frame, textvariable=self._ext_custom_var, width=16).pack(side="left")
-        ttk.Label(ext_frame, text="z.B. gpkg pdf",
-                  font=("Segoe UI", 8, "italic"), style="Dim.TLabel").pack(
-                      side="left", padx=(4, 0))
 
     def _build_actions(self, parent):
         row = ttk.Frame(parent)
@@ -1379,8 +1371,6 @@ class KryDeleteApp(tk.Tk):
         for var, exts in self._ext_vars:
             if var.get():
                 result.extend(exts)
-        for part in self._ext_custom_var.get().replace(",", " ").split():
-            result.append(part if part.startswith(".") else f".{part}")
         return result
 
     def _item_has_thumbnail(self, iid: str) -> bool:
@@ -1427,10 +1417,12 @@ class KryDeleteApp(tk.Tk):
         for iid, key_href in self._items_asset_hrefs.items():
             keys = []
             for k, href in key_href.items():
-                if key_filter and key_filter not in k.lower():
+                href_l, k_l = href.lower(), k.lower()
+                # Treffer im Asset-Key oder im Dateinamen aus der href
+                if key_filter and key_filter not in k_l \
+                        and key_filter not in href_l.rsplit("/", 1)[-1]:
                     continue
                 if extensions:
-                    href_l, k_l = href.lower(), k.lower()
                     if not any(href_l.endswith(e) or k_l.endswith(e) for e in extensions):
                         continue
                 if self._show_faulty_only:

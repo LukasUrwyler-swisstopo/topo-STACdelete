@@ -6,7 +6,7 @@ Kleines GUI-Tool, um Daten gezielt aus dem **Geodata-Warehouse (GDWH)** und aus 
 
 Eingabe im cmd-Terminal:
 ```bash
-python pfad/GUI_deleteDATA_stac_gdwh.py
+python pfad/topo-STAC_GDWH_delete.py
 ```
 <img width="713" height="676" alt="image" src="https://github.com/user-attachments/assets/6c11bb18-c7a4-4faf-8f76-7624d0f838a9" />
 
@@ -71,6 +71,9 @@ Jedes Package landet danach in einer von drei Kategorien: **Erfolgreich bestäti
 
 1. Umgebung wählen, **Credentials laden**
 2. Auftragstyp (KRY/RAM) wählen, Item-ID oder Suchbegriff eingeben (z.B. Datum) → **Laden**
+   Weitere Filter wirken sofort auf die geladene Liste:
+   - **Asset-Key:** Teilstring im Asset-Key oder im Dateinamen (z.B. `nrgb`, `16bit`, `thumbnail`)
+   - **Dateiendung:** `tif/tiff`, `copc.laz/laz`, `jpg/jpeg`, `kml`, `txt`. Mehrere Häkchen gelten als ODER, zusammen mit dem Asset-Key-Filter als UND
 3. Optional **Assets prüfen (HEAD)**, um kaputte/fehlende Dateien (rot markiert) zu finden — dann **Fehlerhafte auswählen**
 4. Assets ankreuzen und **Asset Auswahl löschen** → Sicherheitsabfrage bestätigen
 

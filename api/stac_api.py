@@ -1,7 +1,7 @@
 """
 stac_api.py  –  STAC API Hilfsfunktionen für ch.swisstopo.spezialbefliegungen
 
-Importiert von 0_GUI_stac_gdwh_delete_Data.py.
+Importiert von topo-STAC_GDWH_delete.py.
 Direkt nutzbar: python stac_api.py  (gibt Kurzinfo aus)
 """
 
@@ -87,8 +87,8 @@ EXT_PRESETS: List[Tuple[str, List[str]]] = [
     ("tif / tiff",      [".tif", ".tiff"]),
     ("copc.laz / laz",  [".copc.laz", ".laz"]),
     ("jpg / jpeg",      [".jpg", ".jpeg"]),
-    ("png",             [".png"]),
-    ("json",            [".json"]),
+    ("kml",             [".kml"]),
+    ("txt",             [".txt"]),
 ]
 
 
