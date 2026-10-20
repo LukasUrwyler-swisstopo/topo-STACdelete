@@ -326,6 +326,9 @@ class KryDeleteApp(tk.Tk):
     _CHK_OFF     = "◯"
     _CHK_PARTIAL = "◐"
 
+    _CRED_BTN_LABEL        = "Credentials laden"
+    _CRED_LOADED_BTN_LABEL = "Credentials geladen"
+
     _LOAD_BTN_LABEL        = "ITEM-Liste laden"
     _LOAD_BTN_LABEL_RELOAD = "ITEM-Liste aktualisieren"
     _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -340,7 +343,8 @@ class KryDeleteApp(tk.Tk):
     _NO_THUMB_EXCLUDE_SUBSTR = "t23595900"
 
     _GDWH_FETCH_BTN_LABEL        = "Imports laden"
-    _GDWH_FETCH_BTN_LABEL_RELOAD = "Imports aktualisieren"
+    _GDWH_FETCH_BTN_LABEL_BUSY   = "Imports werden geladen"
+    _GDWH_FETCH_BTN_LABEL_DONE   = "Imports geladen"
     _GDWH_LEICHEN_BTN_LABEL      = f"GDWH-Anomalien anzeigen (>{_GDWH_PENDING_HOURS}h ohne Daten)"
     _GDWH_LEICHEN_BTN_LABEL_BACK = "Zurück zur normalen Ansicht"
 
@@ -394,8 +398,6 @@ class KryDeleteApp(tk.Tk):
         # Container-Frame je DataPackage-Zeile (pkg_id → Frame), damit einzelne
         # Zeilen nach erfolgreicher Löschung gezielt entfernt werden können.
         self._gdwh_row_widgets: Dict[str, tk.Frame] = {}
-        # Analog zu self._items_loaded_once, für den "Imports laden"-Button.
-        self._gdwh_loaded_once: bool = False
 
         self._file_logger = self._setup_file_logger()
         self._build_ui()
@@ -519,33 +521,44 @@ class KryDeleteApp(tk.Tk):
         sec = ttk.LabelFrame(parent, text="1   Umgebung & Credentials",
                              padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
-        sec.columnconfigure(7, weight=1)
 
-        ttk.Label(sec, text="Umgebung:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self._env_var = tk.StringVar(value="INT")
-        self._env_radios: List[ttk.Radiobutton] = []
-        for col, env in enumerate(("INT", "PROD"), 1):
-            rb = ttk.Radiobutton(sec, text=env, variable=self._env_var, value=env,
-                                  command=self._on_env_change)
-            rb.grid(row=0, column=col, sticky="w", padx=4)
-            self._env_radios.append(rb)
+        # Aufbau analog zum STAC Monitor:
+        # Zeile 1: "Credentials laden" vor der Umgebungswahl – der Lade-Status
+        # steckt im Button selbst (Text + Farbe amber/grün), kein separates Label.
+        # Zeile 2: "ITEM-Liste laden" direkt darunter + "STAC Browser öffnen".
+        # Die URL bleibt hier (anders als im Monitor) sichtbar: im Lösch-Tool
+        # soll die Zielumgebung jederzeit auf einen Blick erkennbar sein.
+        row1 = ttk.Frame(sec)
+        row1.pack(side="top", anchor="w")
 
-        self._cred_btn = ttk.Button(sec, text="Credentials laden",
+        self._cred_btn = ttk.Button(row1, text=self._CRED_BTN_LABEL,
                                      command=self._load_credentials,
                                      style="Amber.TButton")
-        self._cred_btn.grid(row=0, column=3, padx=(12, 8))
+        self._cred_btn.pack(side="left", padx=(0, 16))
 
-        self._cred_status = ttk.Label(sec, text="nicht geladen",
-                                       font=("Segoe UI", 9, "italic"),
-                                       style="Dim.TLabel")
-        self._cred_status.grid(row=0, column=4, padx=(0, 12))
+        ttk.Label(row1, text="Umgebung:").pack(side="left", padx=(0, 6))
+        self._env_var = tk.StringVar(value="INT")
+        self._env_radios: List[ttk.Radiobutton] = []
+        for env in ("INT", "PROD"):
+            rb = ttk.Radiobutton(row1, text=env, variable=self._env_var, value=env,
+                                  command=self._on_env_change)
+            rb.pack(side="left", padx=4)
+            self._env_radios.append(rb)
 
-        ttk.Button(sec, text="STAC Browser öffnen",
-                   command=self._open_stac_browser).grid(row=0, column=5, padx=(0, 12))
-
-        self._url_lbl = ttk.Label(sec, text=ENVIRONMENTS["INT"],
+        self._url_lbl = ttk.Label(row1, text=ENVIRONMENTS["INT"],
                                    font=("Segoe UI", 8), style="Dim.TLabel")
-        self._url_lbl.grid(row=0, column=6, sticky="w", padx=(0, 8))
+        self._url_lbl.pack(side="left", padx=(12, 0))
+
+        row2 = ttk.Frame(sec)
+        row2.pack(side="top", anchor="w", pady=(6, 0))
+
+        self._load_btn = ttk.Button(
+            row2, text=self._LOAD_BTN_LABEL, command=self._load, state="disabled",
+            style="AmberBold.TButton")
+        self._load_btn.pack(side="left", padx=(0, 6))
+
+        ttk.Button(row2, text="STAC Browser öffnen",
+                   command=self._open_stac_browser).pack(side="left")
 
     def _build_step2(self, parent):
         sec = ttk.LabelFrame(parent, text="2   Auftragstyp, Item & Asset-Filter",
@@ -615,15 +628,10 @@ class KryDeleteApp(tk.Tk):
                 side="left", padx=(0, 10))
 
     def _build_actions(self, parent):
+        # "ITEM-Liste laden" sitzt (analog STAC Monitor) in Abschnitt 1,
+        # siehe _build_step1.
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=(0, 6))
-
-        self._load_btn = ttk.Button(
-            row, text=self._LOAD_BTN_LABEL, command=self._load, state="disabled",
-            style="AmberBold.TButton")
-        self._load_btn.pack(side="left", padx=(0, 16))
-
-        ttk.Separator(row, orient="vertical").pack(side="left", fill="y", padx=(0, 16))
 
         self._expand_btn = ttk.Button(
             row, text="Alle aufklappen", command=self._expand_all, state="disabled")
@@ -793,6 +801,8 @@ class KryDeleteApp(tk.Tk):
         self._build_gdwh_step2(self._gdwh_sf)
         self._build_gdwh_step3(self._gdwh_sf)
         self._build_gdwh_step4(self._gdwh_sf)
+        # Erst hier: Button (Abschnitt 1) und GDS-Key (Abschnitt 2) existieren
+        self._gdwh_update_fetch_ready()
 
     def _build_gdwh_step1(self, parent):
         sec = ttk.LabelFrame(
@@ -800,29 +810,49 @@ class KryDeleteApp(tk.Tk):
             text="1   Umgebung",
             padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
-        sec.columnconfigure(3, weight=1)
 
-        ttk.Label(sec, text="Umgebung:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        # Aufbau analog zum STAC-Tab (_build_step1): "Imports laden" vor der
+        # Umgebungswahl – der Lade-Status steckt im Button selbst
+        # (amber gesperrt bis GDS-Key gewählt → amber "laden" → amber
+        # "werden geladen" → grün "geladen"), siehe _gdwh_update_fetch_ready().
+        row1 = ttk.Frame(sec)
+        row1.pack(side="top", anchor="w")
+
+        self._gdwh_fetch_btn = ttk.Button(
+            row1, text=self._GDWH_FETCH_BTN_LABEL,
+            command=self._gdwh_fetch_imports, state="disabled",
+            style="AmberLocked.TButton",
+        )
+        self._gdwh_fetch_btn.pack(side="left", padx=(0, 16))
+
+        # Nur sichtbar, solange der GDS-Key fehlt (pack/pack_forget in
+        # _gdwh_update_fetch_ready)
+        self._gdwh_fetch_hint_lbl = ttk.Label(
+            sec, text="Zuerst GDS-Key wählen (Abschnitt 2), dann „Imports laden“.",
+            font=("Segoe UI", 8, "italic"), style="Hint.TLabel",
+        )
+
+        ttk.Label(row1, text="Umgebung:").pack(side="left", padx=(0, 6))
         self._gdwh_env_var = tk.StringVar(value="INT")
         self._gdwh_env_radios: List[ttk.Radiobutton] = []
-        for col, env in enumerate(("INT", "PROD"), 1):
-            rb = ttk.Radiobutton(sec, text=env, variable=self._gdwh_env_var, value=env,
+        for env in ("INT", "PROD"):
+            rb = ttk.Radiobutton(row1, text=env, variable=self._gdwh_env_var, value=env,
                                   command=self._gdwh_on_env_change)
-            rb.grid(row=0, column=col, sticky="w", padx=4)
+            rb.pack(side="left", padx=4)
             self._gdwh_env_radios.append(rb)
 
-        self._gdwh_url_lbl = ttk.Label(sec, text=GDWH_ENVIRONMENTS["INT"],
+        self._gdwh_url_lbl = ttk.Label(row1, text=GDWH_ENVIRONMENTS["INT"],
                                         font=("Segoe UI", 8), style="Dim.TLabel")
-        self._gdwh_url_lbl.grid(row=0, column=3, sticky="w", padx=12)
+        self._gdwh_url_lbl.pack(side="left", padx=(12, 0))
 
         ttk.Label(
             sec,
             text="Authentifizierung: Windows-Session (aktuell eingeloggter User, wie im Browser)",
             font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ).pack(side="top", anchor="w", pady=(6, 0))
 
     def _build_gdwh_step2(self, parent):
-        sec = ttk.LabelFrame(parent, text="2   GDS-Key & Imports laden",
+        sec = ttk.LabelFrame(parent, text="2   GDS-Key & Filter",
                              padding=10, style="Section.TLabelframe")
         sec.pack(fill="x", pady=(0, 6))
         sec.columnconfigure(1, weight=1)
@@ -861,7 +891,10 @@ class KryDeleteApp(tk.Tk):
 
         ttk.Label(sec, text="GDS-Key:").grid(row=3, column=0, sticky="w",
                                               padx=(0, 8), pady=(6, 0))
-        self._gdwh_gds_key_var = tk.StringVar(value=GDWH_GDS_KEYS[0])
+        # Bewusst ohne Voreinstellung: der GDS-Key bestimmt, WAS geladen wird
+        # (alle anderen Felder filtern nur die geladene Liste). Mit Default
+        # würde unbemerkt SB_DOP geladen.
+        self._gdwh_gds_key_var = tk.StringVar(value="")
         self._gdwh_gds_combo = ttk.Combobox(
             sec, textvariable=self._gdwh_gds_key_var,
             values=[GDWH_ALL_GDS_OPTION] + GDWH_GDS_KEYS, state="readonly", width=28,
@@ -869,13 +902,23 @@ class KryDeleteApp(tk.Tk):
         self._gdwh_gds_combo.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
         self._gdwh_gds_combo.bind(
             "<<ComboboxSelected>>", self._gdwh_on_gds_key_change)
+        ttk.Label(
+            sec, text="Pflicht  —  bestimmt, welche Imports geladen werden",
+            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
+        ).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
 
-        self._gdwh_fetch_btn = ttk.Button(
-            sec, text=self._GDWH_FETCH_BTN_LABEL,
-            command=self._gdwh_fetch_imports, state="normal",
-        )
-        self._gdwh_fetch_btn.grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        # datapackageId (= "uuid" aus GET /data/imports) – eindeutiger Nachweis,
+        # welches DataPackage importiert wurde. Filtert nur die geladene Liste.
+        ttk.Label(sec, text="datapackageId:").grid(row=4, column=0, sticky="w",
+                                                   padx=(0, 8), pady=(6, 0))
+        self._gdwh_pkg_id_filter_var = tk.StringVar()
+        self._gdwh_pkg_id_filter_var.trace_add("write", lambda *_: self._gdwh_apply_filter())
+        ttk.Entry(sec, textvariable=self._gdwh_pkg_id_filter_var, width=40).grid(
+            row=4, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
+        ttk.Label(
+            sec, text="Teilstring genügt  —  filtert die geladene Liste  —  Leer = alle DataPackages",
+            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
+        ).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
 
     def _build_gdwh_step3(self, parent):
         sec = ttk.LabelFrame(parent, text="3   DataPackages auswählen zum Löschen",
@@ -1024,6 +1067,7 @@ class KryDeleteApp(tk.Tk):
             font=("Segoe UI", 10, "bold"))
         s.configure("TLabel",     background=T["panel"], foreground=T["fg"])
         s.configure("Dim.TLabel", background=T["panel"], foreground=T["fg_dim"])
+        s.configure("Hint.TLabel", background=T["panel"], foreground=T["hint"])
         s.configure("TButton",
             background=T["btn"], foreground=T["fg"],
             bordercolor=T["sep"], relief="flat",
@@ -1051,6 +1095,18 @@ class KryDeleteApp(tk.Tk):
                        ("pressed", T["sep"])],
             foreground=[("disabled", T["fg_dim"]), ("active", T["hint"])],
             relief=[("pressed", "flat")],
+        )
+        # Wie Amber, aber auch im Zustand "disabled" amber statt abgedunkelt:
+        # für "Imports laden" ohne GDS-Key und "Imports werden geladen" – der
+        # Button ist dann gesperrt, der Text soll trotzdem amber bleiben.
+        s.configure("AmberLocked.TButton",
+            background=T["btn"], foreground=T["hint"],
+            bordercolor=T["sep"], relief="flat",
+            padding=(8, 4), focuscolor=T["panel"],
+        )
+        s.map("AmberLocked.TButton",
+            background=[("disabled", T["btn"])],
+            foreground=[("disabled", T["hint"])],
         )
         s.configure("AmberBold.TButton",
             background=T["btn"], foreground=T["hint"],
@@ -1248,14 +1304,12 @@ class KryDeleteApp(tk.Tk):
         env = self._env_var.get()
         self._url_lbl.configure(text=ENVIRONMENTS[env])
         self._auth = None
-        self._cred_status.configure(text="nicht geladen")
-        self._cred_btn.configure(style="Amber.TButton")
-        self._load_btn.config(state="disabled")
-        self._load_btn.configure(style="AmberBold.TButton")
+        self._cred_btn.configure(text=self._CRED_BTN_LABEL, style="Amber.TButton")
         # Neue Umgebung = noch nichts geladen: Button-Text auf Ausgangstext
         # zurücksetzen, sonst würde fälschlich "aktualisieren" stehen.
         self._items_loaded_once = False
-        self._load_btn.config(text=self._LOAD_BTN_LABEL)
+        self._load_btn.configure(text=self._LOAD_BTN_LABEL, state="disabled",
+                                 style="AmberBold.TButton")
         self._clear_tree()
         self._clear_state()
         self._preview_lbl.configure(text="Noch keine Vorschau geladen.")
@@ -1302,16 +1356,12 @@ class KryDeleteApp(tk.Tk):
             password = env_cfg["password"]
             self._auth     = (username, password)
             self._base_url = ENVIRONMENTS[env]
-            T = DARK if self._dark else LIGHT
-            self._cred_status.configure(text=f"Geladen: {username}", foreground=T["ok"])
-            self._cred_btn.configure(style="TButton")
+            self._cred_btn.configure(text=self._CRED_LOADED_BTN_LABEL, style="Green.TButton")
             self._load_btn.config(state="normal")
-            self._load_btn.configure(style="AmberBold.TButton")
             self._log_write(f"[STAC Credentials] {env} – Benutzer: {username}\n")
         except Exception as exc:
-            T = DARK if self._dark else LIGHT
-            self._cred_status.configure(text="Fehler!", foreground=T["err"])
-            self._cred_btn.configure(style="Amber.TButton")
+            self._cred_btn.configure(text=self._CRED_BTN_LABEL, style="Amber.TButton")
+            self._log_write(f"[STAC Credentials] FEHLER ({env}): {exc}\n")
             messagebox.showerror("Credentials-Fehler", str(exc))
 
     def _load(self):
@@ -2269,7 +2319,6 @@ class KryDeleteApp(tk.Tk):
         env = self._gdwh_env_var.get()
         self._gdwh_url_lbl.configure(text=GDWH_ENVIRONMENTS[env])
         self._gdwh_base_url = GDWH_ENVIRONMENTS[env]
-        self._gdwh_fetch_btn.config(state="normal")
         self._gdwh_reset_state()
         self._apply_theme(self._dark)
 
@@ -2282,14 +2331,46 @@ class KryDeleteApp(tk.Tk):
     def _gdwh_fetch_imports(self):
         gds_key = self._gdwh_gds_key_var.get().strip()
         if not gds_key:
-            messagebox.showwarning("Eingabe fehlt", "Bitte einen GDS-Key eingeben.")
+            # Eigentlich unerreichbar (Button ohne GDS-Key gesperrt) – Absicherung
+            messagebox.showwarning("Eingabe fehlt", "Bitte zuerst einen GDS-Key wählen.")
             return
-        self._gdwh_fetch_btn.config(state="disabled")
+        self._gdwh_fetch_btn.config(state="disabled", text=self._GDWH_FETCH_BTN_LABEL_BUSY,
+                                    style="AmberLocked.TButton")
+        # Umgebung/GDS-Key während des Ladens sperren: ein Wechsel würde die
+        # Liste zurücksetzen, der noch laufende Worker sie danach aber mit
+        # Daten aus dem ALTEN Kontext wieder befüllen (und grün melden).
+        self._set_gdwh_env_controls_locked(True)
         self._gdwh_del_btn.config(state="disabled")
         self._gdwh_preview_lbl.configure(text="Lade Imports …")
         self._gdwh_clear_list()
         threading.Thread(target=self._gdwh_fetch_worker,
                          args=(gds_key,), daemon=True).start()
+
+    def _gdwh_finish_fetch(self, ok: bool):
+        """Abschluss eines Ladevorgangs (Main-Thread). Grün erst, wenn die
+        Liste komplett aufgebaut ist – _gdwh_apply_filter() baut sie synchron."""
+        self._set_gdwh_env_controls_locked(False)
+        if ok:
+            self._gdwh_apply_filter()
+            self._gdwh_fetch_btn.config(state="normal", text=self._GDWH_FETCH_BTN_LABEL_DONE,
+                                        style="Green.TButton")
+        else:
+            self._gdwh_update_fetch_ready()
+
+    def _gdwh_update_fetch_ready(self):
+        """Fetch-Button in den Ausgangszustand "Imports laden": gesperrt
+        (amber + Hinweis), solange kein GDS-Key gewählt ist, sonst klickbar."""
+        ready = bool(self._gdwh_gds_key_var.get().strip())
+        self._gdwh_fetch_btn.config(
+            text=self._GDWH_FETCH_BTN_LABEL,
+            state="normal" if ready else "disabled",
+            style="Amber.TButton" if ready else "AmberLocked.TButton",
+        )
+        if ready:
+            self._gdwh_fetch_hint_lbl.pack_forget()
+        else:
+            self._gdwh_fetch_hint_lbl.pack(
+                after=self._gdwh_fetch_btn.master, anchor="w", pady=(4, 0))
 
     def _gdwh_fetch_worker(self, gds_key: str):
         self._gdwh_current_gds_key = gds_key
@@ -2330,7 +2411,7 @@ class KryDeleteApp(tk.Tk):
 
             self._gdwh_imports = imports
             self._gdwh_enriched = enriched
-            self.after(0, self._gdwh_apply_filter)
+            self.after(0, lambda: self._gdwh_finish_fetch(True))
 
             pending_count = sum(1 for imp, match in enriched
                                  if match is None and _gdwh_is_pending(imp))
@@ -2339,7 +2420,7 @@ class KryDeleteApp(tk.Tk):
         except Exception as exc:
             self._gdwh_log_write(f"[FEHLER] {exc}\n")
             self.after(0, lambda msg=str(exc): messagebox.showerror("GDWH Fehler", msg))
-            self.after(0, lambda: self._gdwh_fetch_btn.config(state="normal"))
+            self.after(0, lambda: self._gdwh_finish_fetch(False))
             self.after(0, lambda: self._gdwh_preview_lbl.configure(
                 text="Fehler beim Laden."))
 
@@ -2355,8 +2436,8 @@ class KryDeleteApp(tk.Tk):
             f"dauern.\n\n"
             f"Diese Packages sind in der Liste mit „⏳ Frisch importiert“ markiert "
             f"und vorerst nicht auswählbar/löschbar.\n\n"
-            f"Bitte in ein paar Stunden nochmals „{self._GDWH_FETCH_BTN_LABEL_RELOAD}“ "
-            f"klicken, um den aktuellen Stand zu prüfen."
+            f"Bitte in ein paar Stunden nochmals auf „{self._GDWH_FETCH_BTN_LABEL_DONE}“ "
+            f"klicken, um die Imports neu zu laden und den aktuellen Stand zu prüfen."
         )
 
     def _gdwh_toggle_leichen(self):
@@ -2446,12 +2527,26 @@ class KryDeleteApp(tk.Tk):
                     return True
                 return area.lower() in area_val.lower()
             data = [item for item in data if _area_matches(item)]
+        # datapackageId: jedes Import-Objekt hat eine ID, daher – anders als
+        # Jahr/AREA/Auftragstyp – kein "nicht ausblenden bei fehlendem Wert".
+        pkg_id_filter = self._gdwh_pkg_id_filter_var.get().strip().lower()
+        pkg_id_hidden = 0
+        if pkg_id_filter:
+            def _pkg_id_matches(item):
+                return pkg_id_filter in gdwh_import_id(item[0]).lower()
+            data = [item for item in data if _pkg_id_matches(item)]
+            # Treffer, die nur wegen Auftragstyp/Jahr/AREA ausgeblendet sind.
+            # Ohne diesen Hinweis sähe eine exakt eingegebene datapackageId
+            # aus wie "nicht im GDWH", obwohl sie z.B. nur zum anderen
+            # Auftragstyp gehört.
+            pkg_id_hidden = sum(1 for item in base if _pkg_id_matches(item)) - len(data)
         self._gdwh_total_leichen = sum(
             1 for item in self._gdwh_enriched if _is_anomalie(item))
         self._gdwh_total_pending = sum(
             1 for imp, match in self._gdwh_enriched
             if match is None and _gdwh_is_pending(imp))
-        self._gdwh_populate_list(data, leichen_mode=leichen_mode)
+        self._gdwh_populate_list(data, leichen_mode=leichen_mode,
+                                 pkg_id_hidden=pkg_id_hidden)
 
     def _gdwh_reset_state(self):
         # Sicherheitskritisch: bei Umgebungs- oder GDS-Key-Wechsel muss die
@@ -2469,11 +2564,10 @@ class KryDeleteApp(tk.Tk):
         self._gdwh_del_btn.config(
             text="Ausgewählte DataPackages löschen …", state="disabled")
         self._gdwh_preview_lbl.configure(text="Noch keine Imports geladen.")
-        # Neuer Kontext (Umgebung/GDS-Key) = noch nichts geladen: Button-Text
-        # auf Ausgangstext zurücksetzen, sonst würde fälschlich "aktualisieren"
-        # stehen (analog zu _on_env_change() im STAC-Tab).
-        self._gdwh_loaded_once = False
-        self._gdwh_fetch_btn.config(text=self._GDWH_FETCH_BTN_LABEL, style="TButton")
+        # Neuer Kontext (Umgebung/GDS-Key) = noch nichts geladen: Button auf
+        # Ausgangszustand (amber "Imports laden") zurücksetzen, sonst würde
+        # fälschlich grün "Imports geladen" stehen.
+        self._gdwh_update_fetch_ready()
 
     def _gdwh_clear_list(self):
         for w in self._gdwh_list_frame.winfo_children():
@@ -2482,7 +2576,7 @@ class KryDeleteApp(tk.Tk):
         self._gdwh_row_widgets.clear()
 
     def _gdwh_copy_uuid(self, uuid: str, button: tk.Button):
-        """Kopiert die Import-UUID in die Zwischenablage, kurzes visuelles Feedback."""
+        """Kopiert die datapackageId in die Zwischenablage, kurzes visuelles Feedback."""
         self.clipboard_clear()
         self.clipboard_append(uuid)
         orig_text = button.cget("text")
@@ -2490,23 +2584,25 @@ class KryDeleteApp(tk.Tk):
         self.after(1200, lambda: button.config(text=orig_text)
                    if button.winfo_exists() else None)
 
-    def _gdwh_populate_list(self, enriched: List[Tuple], leichen_mode: bool = False):
+    def _gdwh_populate_list(self, enriched: List[Tuple], leichen_mode: bool = False,
+                            pkg_id_hidden: int = 0):
         self._gdwh_clear_list()
         T = DARK if self._dark else LIGHT
         self._gdwh_total_loaded = len(enriched)
 
         if not enriched:
+            empty_text = ("Keine GDWH-Anomalien gefunden." if leichen_mode
+                          else "Keine DataPackages gefunden.")
+            if pkg_id_hidden:
+                empty_text += (f"  {pkg_id_hidden} DataPackage(s) mit dieser datapackageId "
+                               f"vorhanden, aber durch Auftragstyp/Jahr/AREA-Filter ausgeblendet.")
             tk.Label(
                 self._gdwh_list_frame,
-                text=("Keine GDWH-Anomalien gefunden." if leichen_mode
-                      else "Keine DataPackages gefunden."),
+                text=empty_text,
                 font=("Segoe UI", 9, "italic"),
-                bg=T["chk_bg"], fg=T["fg_dim"], padx=8, pady=8,
+                bg=T["chk_bg"], fg=T["hint"] if pkg_id_hidden else T["fg_dim"],
+                padx=8, pady=8,
             ).pack(anchor="w")
-            self._gdwh_loaded_once = True
-            self._gdwh_fetch_btn.config(
-                state="normal", text=self._GDWH_FETCH_BTN_LABEL_RELOAD,
-                style="Amber.TButton")
             self._gdwh_preview_lbl.configure(
                 text="0 GDWH-Anomalien gefunden." if leichen_mode
                      else "0 DataPackages gefunden.")
@@ -2577,7 +2673,7 @@ class KryDeleteApp(tk.Tk):
                 var.trace_add("write", lambda *_: self._gdwh_on_checkbox_change())
                 self._gdwh_selection[pkg_id] = var
 
-            # Container für alle 3 Zeilen dieses Packages – erlaubt, die Zeile
+            # Container für alle 4 Zeilen dieses Packages – erlaubt, die Zeile
             # nach erfolgreicher Löschung gezielt zu entfernen (statt die ganze
             # Liste neu zu laden), siehe _gdwh_remove_deleted_rows().
             entry_frame = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
@@ -2633,8 +2729,7 @@ class KryDeleteApp(tk.Tk):
                     tk.Label(
                         row1,
                         text=f"    ⏳ Frisch importiert — Attribute (Area/Jahr) "
-                             f"folgen, sobald GDWH den Index aktualisiert hat "
-                             f"— Import-UUID: {pkg_id}",
+                             f"folgen, sobald GDWH den Index aktualisiert hat",
                         font=("Segoe UI", 8, "bold"),
                         bg=T["chk_bg"], fg=T["hint"], anchor="w",
                     ).pack(side="left")
@@ -2643,19 +2738,10 @@ class KryDeleteApp(tk.Tk):
                         row1,
                         text=f"    ⚠ Kein FileMetadata-Match seit über "
                              f"{_GDWH_PENDING_HOURS}h — nicht löschbar, bis "
-                             f"geklärt ist ob die Daten noch existieren "
-                             f"— Import-UUID: {pkg_id}",
+                             f"geklärt ist ob die Daten noch existieren",
                         font=("Segoe UI", 8, "bold"),
                         bg=T["chk_bg"], fg=T["err"], anchor="w",
                     ).pack(side="left")
-                copy_btn = tk.Button(
-                    row1, text="⧉ Kopieren", font=("Segoe UI", 7),
-                    bg=T["btn"], fg=T["fg"], relief="flat",
-                    padx=4, pady=0, cursor="hand2",
-                )
-                copy_btn.config(
-                    command=lambda uuid=pkg_id, b=copy_btn: self._gdwh_copy_uuid(uuid, b))
-                copy_btn.pack(side="left", padx=(4, 0))
 
             # ── Zeile 2 (eingerückt): Auftragstyp  StacItemIdDatetime ────────
             row2 = tk.Frame(entry_frame, bg=T["chk_bg"])
@@ -2683,7 +2769,7 @@ class KryDeleteApp(tk.Tk):
 
             # ── Zeile 3 (eingerückt): Commentary  Import-Datum ──────────────
             row3 = tk.Frame(entry_frame, bg=T["chk_bg"])
-            row3.pack(fill="x", padx=30, pady=(0, 2))
+            row3.pack(fill="x", padx=30, pady=0)
 
             parts3 = []
             if commentary:
@@ -2696,10 +2782,32 @@ class KryDeleteApp(tk.Tk):
                 bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
             ).pack(side="left")
 
-        self._gdwh_loaded_once = True
-        self._gdwh_fetch_btn.config(
-            state="normal", text=self._GDWH_FETCH_BTN_LABEL_RELOAD,
-            style="Amber.TButton")
+            # ── Zeile 4 (eingerückt): datapackageId + Kopieren ──────────────
+            # Für JEDES Package (nicht nur pending/Anomalie): die ID ist der
+            # eindeutige Nachweis, welches DataPackage importiert wurde, und
+            # genau diese ID geht beim Löschen an DELETE /data/imports/{id}.
+            row4 = tk.Frame(entry_frame, bg=T["chk_bg"])
+            row4.pack(fill="x", padx=30, pady=(0, 3))
+
+            tk.Label(
+                row4, text=f"datapackageId: {pkg_id}",
+                font=("Cascadia Mono", 8),
+                bg=T["chk_bg"], fg=T["fg"] if deletable else T["fg_dim"], anchor="w",
+            ).pack(side="left")
+
+            copy_btn = tk.Button(
+                row4, text="⧉ Kopieren", font=("Segoe UI", 7),
+                bg=T["btn"], fg=T["fg"], relief="flat",
+                padx=4, pady=0, cursor="hand2",
+            )
+            copy_btn.config(
+                command=lambda uuid=pkg_id, b=copy_btn: self._gdwh_copy_uuid(uuid, b))
+            copy_btn.pack(side="left", padx=(6, 0))
+
+        # Fetch-Button wird hier bewusst NICHT angefasst (siehe
+        # _gdwh_finish_fetch): diese Methode läuft auch bei jedem Filterwechsel
+        # und würde den Button sonst mitten in einem Lade-/Löschvorgang
+        # wieder aktivieren bzw. fälschlich grün setzen.
         st = "normal" if (enriched and not leichen_mode) else "disabled"
         self._gdwh_sel_all_btn.config(state=st)
         self._gdwh_sel_none_btn.config(state=st)
@@ -3111,7 +3219,12 @@ class KryDeleteApp(tk.Tk):
         if self._spinner_job is not None:
             self.after_cancel(self._spinner_job)
             self._spinner_job = None
-        self._load_btn.config(text=self._current_load_btn_label())
+        # Grün nur, wenn dieser Lauf tatsächlich Items geliefert hat und die
+        # Liste angezeigt wurde – _load() leert _items_preview vorab (via
+        # _clear_state), bei Fehler/leerem Resultat bleibt sie leer.
+        loaded = bool(self._items_preview) and self._items_loaded_once
+        self._load_btn.config(text=self._current_load_btn_label(),
+                              style="Green.TButton" if loaded else "TButton")
 
     def _current_load_btn_label(self) -> str:
         return (self._LOAD_BTN_LABEL_RELOAD if self._items_loaded_once
