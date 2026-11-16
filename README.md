@@ -117,7 +117,6 @@ Im Ordner `logs/` (nicht in Git):
 - **GDWH API v2** – [Swagger PROD](https://ltgdwh.adr.admin.ch/gdwh-api/v2/swagger/index.html), [Swagger INT](https://ltgdwhi.adr.admin.ch/gdwh-api/v2/swagger/index.html)
   - Imports auflisten: `GET /api/geodatasets/{gdsKey}/data/imports`
   - Import löschen: `DELETE /api/geodatasets/{gdsKey}/data/imports/{datapackageId}` → Job, Status über `GET /api/jobs/{jobId}`
-  - Das Modul `api/gdwh_api.py` (frühere Lösch-Logik im Tool) wird vom GUI nicht mehr verwendet.
 - **STAC API** – INT `sys-data.int.bgdi.ch`, PROD `data.geo.admin.ch`
   - Lesen über v1, Löschen vorerst über v0.9: v1 akzeptiert keine Basic Auth mehr, nur noch JWT (AWS Cognito)
   - Verbindung über den Bundes-Proxy, ausserhalb des Bundesnetzes automatisch direkt
