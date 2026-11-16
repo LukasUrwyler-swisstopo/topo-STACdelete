@@ -7,9 +7,9 @@ Tab 1 – STAC Items & Assets:
   Format: {"INT": {"username": "...", "password": "..."}, "PROD": {...}}
 
 Tab 2 – GDWH Imports:
-  Löscht DataPackages (Imports) aus dem GDWH.
-  Credentials: secrets/gdwh_credentials.json
-  Format: {"INT": {"username": "...", "password": "..."}, "PROD": {...}}
+  Öffnet die offizielle Swagger-Oberfläche der GDWH-API (PROD) im Browser,
+  über die GDWH-Imports manuell gelöscht werden. Vorher erscheint ein
+  Pflicht-Hinweis, welche GDS selbst gelöscht werden dürfen.
 
 Autor: (basierend auf util_stac_delete_ram.py von David Oesch)
 Datum: 2025-12
@@ -28,7 +28,7 @@ import webbrowser
 from email.utils import parsedate
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from api.stac_api import (
     COLLECTION_ID, ENVIRONMENTS, AUFTRAGSTYPEN, EXT_PRESETS,
@@ -37,45 +37,22 @@ from api.stac_api import (
     stac_item_year, stac_item_area, stac_item_acq_date,
     list_asset_uploads, abort_asset_upload,
 )
-from api.gdwh_api import (
-    GDWH_ENVIRONMENTS, GDWH_GDS_KEYS,
-    gdwh_get_imports, gdwh_delete_import, gdwh_cleanup_data_package,
-    gdwh_wait_for_jobs, GDWH_JOB_STATUS_SUCCESS, GDWH_JOB_STATUS_FAILURE,
-    gdwh_import_id, gdwh_import_date, gdwh_import_status,
-    gdwh_import_footprint_bbox,
-    gdwh_search_file_metadata, gdwh_index_file_metadata_by_import,
+
+# Offizielle Swagger-Oberfläche der GDWH-API (PROD). GDWH-Imports werden dort
+# manuell gelöscht – das Tool selbst löscht im GDWH nichts mehr.
+GDWH_SWAGGER_URL = "https://ltgdwh.adr.admin.ch/gdwh-api/v2/swagger/index.html"
+
+# Pflicht-Hinweis vor dem Öffnen der Swagger-Seite: SB_DSM_PUNKTWOLKE darf nur
+# das Team GDWH löschen (sonst Konflikt mit dem ReleaseKey).
+_GDWH_SWAGGER_NOTICE = (
+    "Imports des GDS «SB_DSM_PUNKTWOLKE» NICHT selbst löschen!\n\n"
+    "Diese Daten werden ausschliesslich durch das Team GDWH gelöscht – "
+    "bitte die Löschung dort beantragen. Eine manuelle Löschung führt zu "
+    "Konflikten mit dem ReleaseKey.\n\n"
+    "Imports der GDS «SB_DOP», «SB_DOP_16» und «SB_DSM» können problemlos "
+    "manuell gelöscht werden.\n\n"
+    "Swagger-Seite der GDWH-API (PROD) jetzt im Browser öffnen?"
 )
-
-# Sentinel im GDS-Key-Dropdown: lädt/filtert Imports über alle GDS_KEYS hinweg
-# statt nur einen einzelnen. Kein echter GDS-Key, daher klar als Auswahl-Option
-# von GDWH_GDS_KEYS abgesetzt (nie an die GDWH-API übergeben).
-GDWH_ALL_GDS_OPTION = "Alle GDS"
-
-# GDWH indexiert den fileMetadata-Suchindex (Area/Jahr/Auftragstyp) zeitversetzt
-# zum eigentlichen Import – live verifiziert am 2026-08-20: ein Import von
-# vor >1h hatte noch keinen Match, alle älteren Imports desselben Tages
-# (ab ca. 4h zuvor) bereits. Innerhalb dieses Fensters ist "kein Match" also
-# normal und KEINE Anomalie. Erst danach gilt ein fehlender Match als
-# vermutlich verwaister Alt-Eintrag (siehe _gdwh_apply_filter).
-_GDWH_PENDING_HOURS = 24
-
-# Polling des Lösch-Jobs (GET /api/jobs/{jobId}) nach dem DELETE-Aufruf:
-# solange warten bis der Job einen terminalen Status meldet (Erfolg/Fehler),
-# max. jedoch _GDWH_JOB_POLL_TIMEOUT Sekunden pro Package, bevor mit
-# unbekanntem Status weitergefahren wird (siehe gdwh_wait_for_job).
-_GDWH_JOB_POLL_TIMEOUT  = 300.0
-_GDWH_JOB_POLL_INTERVAL = 4.0
-
-
-def _gdwh_is_pending(imp: Dict) -> bool:
-    """True, wenn ein Import jünger als _GDWH_PENDING_HOURS ist. Für so junge
-    Imports ist ein fehlender FileMetadata-Match durch die Indexierungs-
-    Verzögerung von GDWH erklärt, nicht durch eine echte Anomalie."""
-    try:
-        imp_dt = datetime.strptime(gdwh_import_date(imp), "%Y-%m-%d %H:%M")
-    except ValueError:
-        return False
-    return datetime.now() - imp_dt < timedelta(hours=_GDWH_PENDING_HOURS)
 
 # ─── Farbpaletten ─────────────────────────────────────────────────────────────
 
@@ -175,7 +152,7 @@ def _status_label(sc: Optional[int]) -> Tuple[str, str]:
 # ─── Bestätigungs-Dialog (STAC) ───────────────────────────────────────────────
 
 class _BaseConfirmDialog(tk.Toplevel):
-    """Gemeinsame Basis für die Löschbestätigungs-Dialoge (STAC & GDWH).
+    """Basis für den Löschbestätigungs-Dialog (STAC).
 
     Unterklassen liefern Titel und Info-Text über _title()/_info_text();
     Aufbau, Bestätigungs-Checkbox/-Eingabe und Zustandslogik sind identisch.
@@ -291,26 +268,6 @@ class ConfirmDialog(_BaseConfirmDialog):
                 "Assets werden permanent gelöscht.")
 
 
-# ─── Bestätigungs-Dialog (GDWH) ──────────────────────────────────────────────
-
-class GDWHConfirmDialog(_BaseConfirmDialog):
-    def __init__(self, parent, environment: str, gds_key: str,
-                 pkg_count: int, dark: bool):
-        self._gds_key   = gds_key
-        self._pkg_count = pkg_count
-        super().__init__(parent, environment, dark)
-
-    def _title(self) -> str:
-        return "GDWH Löschung bestätigen"
-
-    def _info_text(self, env: str) -> str:
-        return (f"Umgebung:                    {env}\n"
-                f"GDS-Key:                     {self._gds_key}\n"
-                f"DataPackages zum Löschen:   {self._pkg_count}\n\n"
-                "Alle Daten der ausgewählten DataPackages\n"
-                "werden permanent und unwiderruflich gelöscht.\n"
-                "Die Löschung im GDWH ist asynchron (Job wird gestartet).")
-
 
 # ─── Haupt-GUI ────────────────────────────────────────────────────────────────
 
@@ -341,12 +298,6 @@ class KryDeleteApp(tk.Tk):
     # Thumbnail (z.B. Übersichts-/Mosaik-Items) – im "ITEMs ohne Thumbnail"-
     # Filter sind sie keine echten Kandidaten und sollen nicht auftauchen.
     _NO_THUMB_EXCLUDE_SUBSTR = "t23595900"
-
-    _GDWH_FETCH_BTN_LABEL        = "Imports laden"
-    _GDWH_FETCH_BTN_LABEL_BUSY   = "Imports werden geladen"
-    _GDWH_FETCH_BTN_LABEL_DONE   = "Imports geladen"
-    _GDWH_LEICHEN_BTN_LABEL      = f"GDWH-Anomalien anzeigen (>{_GDWH_PENDING_HOURS}h ohne Daten)"
-    _GDWH_LEICHEN_BTN_LABEL_BACK = "Zurück zur normalen Ansicht"
 
     def __init__(self):
         super().__init__()
@@ -390,14 +341,6 @@ class KryDeleteApp(tk.Tk):
         # (nicht schon beim reinen Fetch) – danach zeigt der Button dauerhaft
         # die "aktualisieren"-Variante. Reset bei Umgebungswechsel.
         self._items_loaded_once: bool = False
-
-        # GDWH State
-        self._gdwh_base_url: str = GDWH_ENVIRONMENTS["INT"]
-        self._gdwh_imports: List[Dict] = []
-        self._gdwh_selection: Dict[str, tk.BooleanVar] = {}
-        # Container-Frame je DataPackage-Zeile (pkg_id → Frame), damit einzelne
-        # Zeilen nach erfolgreicher Löschung gezielt entfernt werden können.
-        self._gdwh_row_widgets: Dict[str, tk.Frame] = {}
 
         self._file_logger = self._setup_file_logger()
         self._build_ui()
@@ -509,9 +452,8 @@ class KryDeleteApp(tk.Tk):
                 "<MouseWheel>",
                 lambda e: self._canvas.yview_scroll(-1 * (e.delta // 120), "units"))
         else:
-            self._gdwh_canvas.bind_all(
-                "<MouseWheel>",
-                lambda e: self._gdwh_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+            # GDWH-Tab hat keinen scrollbaren Inhalt
+            self.unbind_all("<MouseWheel>")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STAC Tab – Schritte 1–4
@@ -774,265 +716,39 @@ class KryDeleteApp(tk.Tk):
         self._status_lbl.pack(side="left")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # GDWH Tab – Schritte 1–4
+    # GDWH Tab – Link zur GDWH-API (Swagger)
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _build_gdwh_tab(self, parent):
-        outer = ttk.Frame(parent)
-        outer.pack(fill="both", expand=True)
+        ttk.Button(
+            parent, text="GDWH-API (Swagger) im Browser öffnen …",
+            style="AmberBold.TButton", padding=(24, 12), cursor="hand2",
+            command=self._gdwh_open_swagger,
+        ).place(relx=0.5, rely=0.4, anchor="center")
 
-        self._gdwh_canvas = tk.Canvas(outer, highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient="vertical", command=self._gdwh_canvas.yview)
-        self._gdwh_canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        self._gdwh_canvas.pack(side="left", fill="both", expand=True)
-
-        self._gdwh_sf = ttk.Frame(self._gdwh_canvas)
-        win_id = self._gdwh_canvas.create_window((0, 0), window=self._gdwh_sf, anchor="nw")
-        self._gdwh_sf.bind(
-            "<Configure>",
-            lambda _: self._gdwh_canvas.configure(
-                scrollregion=self._gdwh_canvas.bbox("all")))
-        self._gdwh_canvas.bind(
-            "<Configure>",
-            lambda e: self._gdwh_canvas.itemconfig(win_id, width=e.width))
-
-        self._build_gdwh_step1(self._gdwh_sf)
-        self._build_gdwh_step2(self._gdwh_sf)
-        self._build_gdwh_step3(self._gdwh_sf)
-        self._build_gdwh_step4(self._gdwh_sf)
-        # Erst hier: Button (Abschnitt 1) und GDS-Key (Abschnitt 2) existieren
-        self._gdwh_update_fetch_ready()
-
-    def _build_gdwh_step1(self, parent):
-        sec = ttk.LabelFrame(
-            parent,
-            text="1   Umgebung",
-            padding=10, style="Section.TLabelframe")
-        sec.pack(fill="x", pady=(0, 6))
-
-        # Aufbau analog zum STAC-Tab (_build_step1): "Imports laden" vor der
-        # Umgebungswahl – der Lade-Status steckt im Button selbst
-        # (amber gesperrt bis GDS-Key gewählt → amber "laden" → amber
-        # "werden geladen" → grün "geladen"), siehe _gdwh_update_fetch_ready().
-        row1 = ttk.Frame(sec)
-        row1.pack(side="top", anchor="w")
-
-        self._gdwh_fetch_btn = ttk.Button(
-            row1, text=self._GDWH_FETCH_BTN_LABEL,
-            command=self._gdwh_fetch_imports, state="disabled",
-            style="AmberLocked.TButton",
-        )
-        self._gdwh_fetch_btn.pack(side="left", padx=(0, 16))
-
-        # Nur sichtbar, solange der GDS-Key fehlt (pack/pack_forget in
-        # _gdwh_update_fetch_ready)
-        self._gdwh_fetch_hint_lbl = ttk.Label(
-            sec, text="Zuerst GDS-Key wählen (Abschnitt 2), dann „Imports laden“.",
-            font=("Segoe UI", 8, "italic"), style="Hint.TLabel",
-        )
-
-        ttk.Label(row1, text="Umgebung:").pack(side="left", padx=(0, 6))
-        self._gdwh_env_var = tk.StringVar(value="INT")
-        self._gdwh_env_radios: List[ttk.Radiobutton] = []
-        for env in ("INT", "PROD"):
-            rb = ttk.Radiobutton(row1, text=env, variable=self._gdwh_env_var, value=env,
-                                  command=self._gdwh_on_env_change)
-            rb.pack(side="left", padx=4)
-            self._gdwh_env_radios.append(rb)
-
-        self._gdwh_url_lbl = ttk.Label(row1, text=GDWH_ENVIRONMENTS["INT"],
-                                        font=("Segoe UI", 8), style="Dim.TLabel")
-        self._gdwh_url_lbl.pack(side="left", padx=(12, 0))
-
-        ttk.Label(
-            sec,
-            text="Authentifizierung: Windows-Session (aktuell eingeloggter User, wie im Browser)",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).pack(side="top", anchor="w", pady=(6, 0))
-
-    def _build_gdwh_step2(self, parent):
-        sec = ttk.LabelFrame(parent, text="2   GDS-Key & Filter",
-                             padding=10, style="Section.TLabelframe")
-        sec.pack(fill="x", pady=(0, 6))
-        sec.columnconfigure(1, weight=1)
-
-        ttk.Label(sec, text="Auftragstyp:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self._gdwh_auftragstyp_var = tk.StringVar(value=list(AUFTRAGSTYPEN.keys())[0])
-        gdwh_typ_frame = ttk.Frame(sec)
-        gdwh_typ_frame.grid(row=0, column=1, columnspan=2, sticky="w")
-        for typ in AUFTRAGSTYPEN:
-            ttk.Radiobutton(
-                gdwh_typ_frame, text=typ, variable=self._gdwh_auftragstyp_var, value=typ,
-                command=self._gdwh_apply_filter,
-            ).pack(side="left", padx=(0, 14))
-
-        ttk.Label(sec, text="Jahr:").grid(row=1, column=0, sticky="w",
-                                           padx=(0, 8), pady=(6, 0))
-        self._gdwh_year_filter_var = tk.StringVar()
-        self._gdwh_year_filter_var.trace_add("write", lambda *_: self._gdwh_apply_filter())
-        ttk.Entry(sec, textvariable=self._gdwh_year_filter_var, width=8).grid(
-            row=1, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(
-            sec, text="z.B. 2023  —  Leer = alle Jahre",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
-
-        ttk.Label(sec, text="AREA:").grid(row=2, column=0, sticky="w",
-                                           padx=(0, 8), pady=(6, 0))
-        self._gdwh_area_filter_var = tk.StringVar()
-        self._gdwh_area_filter_var.trace_add("write", lambda *_: self._gdwh_apply_filter())
-        ttk.Entry(sec, textvariable=self._gdwh_area_filter_var, width=14).grid(
-            row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(
-            sec, text="z.B. OBERAAR  —  Leer = alle Areas",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
-
-        ttk.Label(sec, text="GDS-Key:").grid(row=3, column=0, sticky="w",
-                                              padx=(0, 8), pady=(6, 0))
-        # Bewusst ohne Voreinstellung: der GDS-Key bestimmt, WAS geladen wird
-        # (alle anderen Felder filtern nur die geladene Liste). Mit Default
-        # würde unbemerkt SB_DOP geladen.
-        self._gdwh_gds_key_var = tk.StringVar(value="")
-        self._gdwh_gds_combo = ttk.Combobox(
-            sec, textvariable=self._gdwh_gds_key_var,
-            values=[GDWH_ALL_GDS_OPTION] + GDWH_GDS_KEYS, state="readonly", width=28,
-        )
-        self._gdwh_gds_combo.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
-        self._gdwh_gds_combo.bind(
-            "<<ComboboxSelected>>", self._gdwh_on_gds_key_change)
-        ttk.Label(
-            sec, text="Pflicht  —  bestimmt, welche Imports geladen werden",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
-
-        # datapackageId (= "uuid" aus GET /data/imports) – eindeutiger Nachweis,
-        # welches DataPackage importiert wurde. Filtert nur die geladene Liste.
-        ttk.Label(sec, text="datapackageId:").grid(row=4, column=0, sticky="w",
-                                                   padx=(0, 8), pady=(6, 0))
-        self._gdwh_pkg_id_filter_var = tk.StringVar()
-        self._gdwh_pkg_id_filter_var.trace_add("write", lambda *_: self._gdwh_apply_filter())
-        ttk.Entry(sec, textvariable=self._gdwh_pkg_id_filter_var, width=40).grid(
-            row=4, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
-        ttk.Label(
-            sec, text="Teilstring genügt  —  filtert die geladene Liste  —  Leer = alle DataPackages",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
-
-    def _build_gdwh_step3(self, parent):
-        sec = ttk.LabelFrame(parent, text="3   DataPackages auswählen zum Löschen",
-                             padding=10, style="Section.TLabelframe")
-        sec.pack(fill="x", pady=(0, 6))
-        sec.columnconfigure(0, weight=1)
-
-        sel_row = ttk.Frame(sec)
-        sel_row.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-
-        self._gdwh_sel_all_btn = ttk.Button(
-            sel_row, text="Alle auswählen",
-            command=self._gdwh_select_all, state="disabled",
-        )
-        self._gdwh_sel_all_btn.pack(side="left", padx=(0, 4))
-
-        self._gdwh_sel_none_btn = ttk.Button(
-            sel_row, text="Alle abwählen",
-            command=self._gdwh_deselect_all, state="disabled",
-        )
-        self._gdwh_sel_none_btn.pack(side="left")
-
-        # Umschalter Normalansicht ↔ GDWH-Anomalien (siehe _gdwh_apply_filter):
-        # standardmässig werden Imports mit FileMetadata-Match sowie frisch
-        # importierte, noch nicht indexierte Imports gezeigt (pending, siehe
-        # _gdwh_is_pending). Nur Imports OHNE Match, die älter als
-        # _GDWH_PENDING_HOURS sind, gelten als Anomalie – vermutlich bereits
-        # gelöscht/nie vollständig importiert, nur noch als Historieneintrag
-        # in GET /data/imports sichtbar. Erneutes "Löschen" wäre dort ein
-        # No-Op mit falschem Erfolgsstatus.
-        self._gdwh_show_leichen_var = tk.BooleanVar(value=False)
-        self._gdwh_leichen_btn = ttk.Button(
-            sel_row, text=self._GDWH_LEICHEN_BTN_LABEL,
-            command=self._gdwh_toggle_leichen, state="disabled",
-        )
-        self._gdwh_leichen_btn.pack(side="left", padx=(12, 0))
-
-        list_outer = tk.Frame(sec, bd=1, relief="sunken")
-        list_outer.grid(row=1, column=0, sticky="nsew", pady=(0, 4))
-        sec.rowconfigure(1, weight=1)
-
-        self._gdwh_list_canvas = tk.Canvas(list_outer, height=220, highlightthickness=0)
-        vsb = ttk.Scrollbar(list_outer, orient="vertical",
-                             command=self._gdwh_list_canvas.yview)
-        self._gdwh_list_canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        self._gdwh_list_canvas.pack(side="left", fill="both", expand=True)
-
-        self._gdwh_list_frame = tk.Frame(self._gdwh_list_canvas)
-        lwin = self._gdwh_list_canvas.create_window(
-            (0, 0), window=self._gdwh_list_frame, anchor="nw")
-        self._gdwh_list_frame.bind(
-            "<Configure>",
-            lambda _: self._gdwh_list_canvas.configure(
-                scrollregion=self._gdwh_list_canvas.bbox("all")))
-        self._gdwh_list_canvas.bind(
-            "<Configure>",
-            lambda e: self._gdwh_list_canvas.itemconfig(lwin, width=e.width))
-
-        # Mausrad: innerer Canvas bei Hover, äusserer GDWH-Canvas sonst
-        self._gdwh_list_canvas.bind("<Enter>", lambda _: self._gdwh_list_canvas.bind_all(
-            "<MouseWheel>",
-            lambda e: self._gdwh_list_canvas.yview_scroll(-1 * (e.delta // 120), "units")))
-        self._gdwh_list_canvas.bind("<Leave>", lambda _: self._gdwh_canvas.bind_all(
-            "<MouseWheel>",
-            lambda e: self._gdwh_canvas.yview_scroll(-1 * (e.delta // 120), "units")))
-
-        self._gdwh_preview_lbl = ttk.Label(
-            sec, text="Noch keine Imports geladen.",
-            font=("Segoe UI", 9, "italic"), style="Dim.TLabel",
-        )
-        self._gdwh_preview_lbl.grid(row=2, column=0, sticky="w", pady=(2, 0))
-
-    def _build_gdwh_step4(self, parent):
-        sec = ttk.LabelFrame(parent, text="4   Löschung ausführen",
-                             padding=10, style="Section.TLabelframe")
-        sec.pack(fill="both", expand=True, pady=(0, 4))
-        sec.columnconfigure(1, weight=1)
-        sec.rowconfigure(1, weight=1)
-
-        # E-Mail (optional – GDWH schickt Benachrichtigung nach Abschluss)
-        ttk.Label(sec, text="E-Mail (optional):").grid(
-            row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
-        self._gdwh_email_var = tk.StringVar()
-        ttk.Entry(sec, textvariable=self._gdwh_email_var, width=40).grid(
-            row=0, column=1, sticky="w", pady=(0, 8))
-        ttk.Label(
-            sec,
-            text="GDWH schickt Benachrichtigung wenn der Lösch-Job abgeschlossen ist",
-            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=0, column=2, sticky="w", padx=(10, 0), pady=(0, 8))
-
-        self._gdwh_log = scrolledtext.ScrolledText(
-            sec, height=10, state="disabled",
-            font=("Cascadia Mono", 9), wrap="word",
-        )
-        self._gdwh_log.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(0, 8))
-
-        btn_row = ttk.Frame(sec)
-        btn_row.grid(row=2, column=0, columnspan=3, sticky="ew")
-
-        self._gdwh_del_btn = tk.Button(
-            btn_row, text="Ausgewählte DataPackages löschen …",
-            relief="flat", padx=14, pady=6,
-            font=("Segoe UI", 10, "bold"), state="disabled",
-            command=self._gdwh_start_deletion,
-        )
-        self._gdwh_del_btn.pack(side="left")
-
-        self._gdwh_progress = ttk.Progressbar(btn_row, mode="determinate", length=220)
-        self._gdwh_progress.pack(side="left", padx=16)
-
-        self._gdwh_status_lbl = ttk.Label(btn_row, text="", font=("Segoe UI", 9))
-        self._gdwh_status_lbl.pack(side="left")
+    def _gdwh_open_swagger(self):
+        """Zeigt den Pflicht-Hinweis zu den GDS-Zuständigkeiten und öffnet die
+        Swagger-Seite erst nach Bestätigung mit OK."""
+        if not messagebox.askokcancel(
+                "GDWH-Imports löschen – bitte beachten", _GDWH_SWAGGER_NOTICE,
+                icon="warning", parent=self):
+            return
+        try:
+            opened = webbrowser.open(GDWH_SWAGGER_URL, new=2)
+        except Exception as exc:
+            self._file_logger.warning(f"[GDWH] Browser-Start fehlgeschlagen: {exc}")
+            opened = False
+        if opened:
+            self._file_logger.info(f"[GDWH] Swagger-Seite geöffnet: {GDWH_SWAGGER_URL}")
+            return
+        # Kein Browser gefunden: Link für manuelles Öffnen bereitstellen
+        self.clipboard_clear()
+        self.clipboard_append(GDWH_SWAGGER_URL)
+        messagebox.showerror(
+            "Browser nicht geöffnet",
+            "Der Browser konnte nicht gestartet werden. Der Link wurde in die "
+            f"Zwischenablage kopiert:\n\n{GDWH_SWAGGER_URL}",
+            parent=self)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Theme
@@ -1199,7 +915,6 @@ class KryDeleteApp(tk.Tk):
 
         self.configure(bg=T["root"])
         self._canvas.configure(bg=T["panel"], highlightbackground=T["sep"])
-        self._gdwh_canvas.configure(bg=T["panel"], highlightbackground=T["sep"])
         self._hdr.configure(bg=T["hdr_bg"])
         self._hdr_lbl.configure(bg=T["hdr_bg"], fg=T["hdr_fg"])
         self._theme_btn.configure(
@@ -1209,8 +924,6 @@ class KryDeleteApp(tk.Tk):
         )
         self._log.configure(bg=T["log_bg"], fg=T["log_fg"],
                              insertbackground=T["log_fg"])
-        self._gdwh_log.configure(bg=T["log_bg"], fg=T["log_fg"],
-                                  insertbackground=T["log_fg"])
 
         # STAC Asset-Tree
         self._tree.tag_configure("item", foreground=T["chk_item"], font=("Segoe UI", 9, "bold"))
@@ -1229,10 +942,6 @@ class KryDeleteApp(tk.Tk):
         # trägt (rot/orange) und die Glyphe ◯→⬤ allein zu unauffällig wäre.
         self._tree.tag_configure("checked_asset", font=("Segoe UI", 9, "bold"))
 
-        self._gdwh_list_canvas.configure(bg=T["chk_bg"])
-        self._gdwh_list_frame.configure(bg=T["chk_bg"])
-        self._gdwh_recolor_list(T)
-
         # STAC Lösch-Button
         if str(self._del_btn["state"]) == "disabled":
             self._del_btn.configure(
@@ -1244,37 +953,7 @@ class KryDeleteApp(tk.Tk):
                 activebackground="#b71c1c" if dark else "#c62828",
                 activeforeground="#ffffff")
 
-        # GDWH Lösch-Button
-        if str(self._gdwh_del_btn["state"]) == "disabled":
-            self._gdwh_del_btn.configure(
-                bg=T["btn"], fg=T["fg_dim"],
-                activebackground=T["btn_hover"], activeforeground=T["fg"])
-        else:
-            self._gdwh_del_btn.configure(
-                bg=T["err"], fg="#ffffff",
-                activebackground="#b71c1c" if dark else "#c62828",
-                activeforeground="#ffffff")
-
         self._set_titlebar_dark(dark)
-
-    def _gdwh_recolor_list(self, T: dict):
-        def recolor(widget):
-            cls = widget.winfo_class()
-            if cls == "Frame":
-                widget.configure(bg=T["chk_bg"])
-            elif cls == "Label":
-                if getattr(widget, "_is_pkg_header", False):
-                    widget.configure(bg=T["chk_bg"], fg=T["chk_item"])
-                else:
-                    widget.configure(bg=T["chk_bg"], fg=T["fg_dim"])
-            elif cls == "Checkbutton":
-                widget.configure(
-                    bg=T["chk_bg"], fg=T["fg"],
-                    selectcolor=T["input"],
-                    activebackground=T["chk_bg"], activeforeground=T["fg"])
-            for child in widget.winfo_children():
-                recolor(child)
-        recolor(self._gdwh_list_frame)
 
     def _set_titlebar_dark(self, dark: bool):
         if not self.winfo_ismapped():
@@ -2312,843 +1991,6 @@ class KryDeleteApp(tk.Tk):
         self._update_preview_label()
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # GDWH – Event Handler
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _gdwh_on_env_change(self):
-        env = self._gdwh_env_var.get()
-        self._gdwh_url_lbl.configure(text=GDWH_ENVIRONMENTS[env])
-        self._gdwh_base_url = GDWH_ENVIRONMENTS[env]
-        self._gdwh_reset_state()
-        self._apply_theme(self._dark)
-
-    def _gdwh_on_gds_key_change(self, _event=None):
-        # Siehe _gdwh_reset_state(): die DataPackage-IDs einer geladenen Liste
-        # gehören zum GDS-Key, unter dem sie geladen wurden – bei Wechsel des
-        # GDS-Key sofort verwerfen, statt sie gegen den neuen Key stehen zu lassen.
-        self._gdwh_reset_state()
-
-    def _gdwh_fetch_imports(self):
-        gds_key = self._gdwh_gds_key_var.get().strip()
-        if not gds_key:
-            # Eigentlich unerreichbar (Button ohne GDS-Key gesperrt) – Absicherung
-            messagebox.showwarning("Eingabe fehlt", "Bitte zuerst einen GDS-Key wählen.")
-            return
-        self._gdwh_fetch_btn.config(state="disabled", text=self._GDWH_FETCH_BTN_LABEL_BUSY,
-                                    style="AmberLocked.TButton")
-        # Umgebung/GDS-Key während des Ladens sperren: ein Wechsel würde die
-        # Liste zurücksetzen, der noch laufende Worker sie danach aber mit
-        # Daten aus dem ALTEN Kontext wieder befüllen (und grün melden).
-        self._set_gdwh_env_controls_locked(True)
-        self._gdwh_del_btn.config(state="disabled")
-        self._gdwh_preview_lbl.configure(text="Lade Imports …")
-        self._gdwh_clear_list()
-        threading.Thread(target=self._gdwh_fetch_worker,
-                         args=(gds_key,), daemon=True).start()
-
-    def _gdwh_finish_fetch(self, ok: bool):
-        """Abschluss eines Ladevorgangs (Main-Thread). Grün erst, wenn die
-        Liste komplett aufgebaut ist – _gdwh_apply_filter() baut sie synchron."""
-        self._set_gdwh_env_controls_locked(False)
-        if ok:
-            self._gdwh_apply_filter()
-            self._gdwh_fetch_btn.config(state="normal", text=self._GDWH_FETCH_BTN_LABEL_DONE,
-                                        style="Green.TButton")
-        else:
-            self._gdwh_update_fetch_ready()
-
-    def _gdwh_update_fetch_ready(self):
-        """Fetch-Button in den Ausgangszustand "Imports laden": gesperrt
-        (amber + Hinweis), solange kein GDS-Key gewählt ist, sonst klickbar."""
-        ready = bool(self._gdwh_gds_key_var.get().strip())
-        self._gdwh_fetch_btn.config(
-            text=self._GDWH_FETCH_BTN_LABEL,
-            state="normal" if ready else "disabled",
-            style="Amber.TButton" if ready else "AmberLocked.TButton",
-        )
-        if ready:
-            self._gdwh_fetch_hint_lbl.pack_forget()
-        else:
-            self._gdwh_fetch_hint_lbl.pack(
-                after=self._gdwh_fetch_btn.master, anchor="w", pady=(4, 0))
-
-    def _gdwh_fetch_worker(self, gds_key: str):
-        self._gdwh_current_gds_key = gds_key
-        keys_to_load = GDWH_GDS_KEYS if gds_key == GDWH_ALL_GDS_OPTION else [gds_key]
-        try:
-            imports: List[Dict] = []
-            enriched = []
-            for key in keys_to_load:
-                self._gdwh_log_write(f"[GDWH] Lade Imports für GDS-Key: {key} …\n")
-                key_imports = gdwh_get_imports(self._gdwh_base_url, key)
-                # gdsKey stammt zwar bereits aus der API-Antwort, wird hier aber
-                # explizit gesetzt – so bleibt jedes Import-Objekt eindeutig
-                # seinem GDS-Key zugeordnet (sicherheitskritisch bei "Alle GDS":
-                # die Löschung braucht pro Package den passenden GDS-Key, siehe
-                # _gdwh_delete_worker).
-                for imp in key_imports:
-                    imp["gdsKey"] = key
-                imports.extend(key_imports)
-                self._gdwh_log_write(f"[GDWH] {len(key_imports)} DataPackage(s) gefunden.\n")
-
-                # FileMetadata laden und Imports damit anreichern (Area/Jahr/LineID
-                # liegen dauerhaft im GDWH – unabhängig vom Ingest-Bucket, der nach
-                # erfolgreichem Import regelmässig geleert wird).
-                self._gdwh_log_write(f"[GDWH] Lade FileMetadata für GDS-Key: {key} …\n")
-                file_metadata = gdwh_search_file_metadata(self._gdwh_base_url, key)
-                self._gdwh_log_write(
-                    f"[GDWH] {len(file_metadata)} FileMetadata-Eintrag/Einträge gefunden.\n")
-                meta_index = gdwh_index_file_metadata_by_import(file_metadata)
-
-                # Jedem Import die passenden FileMetadata-Attribute zuordnen
-                for imp in key_imports:
-                    match = meta_index.get(gdwh_import_id(imp))
-                    enriched.append((imp, match))
-                    if match:
-                        self._gdwh_log_write(
-                            f"  → {gdwh_import_date(imp)}  Jahr={match['year']}"
-                            + (f"  [{match['area']}]" if match['area'] else "") + "\n")
-
-            self._gdwh_imports = imports
-            self._gdwh_enriched = enriched
-            self.after(0, lambda: self._gdwh_finish_fetch(True))
-
-            pending_count = sum(1 for imp, match in enriched
-                                 if match is None and _gdwh_is_pending(imp))
-            if pending_count:
-                self.after(50, lambda: self._gdwh_show_pending_notice(pending_count))
-        except Exception as exc:
-            self._gdwh_log_write(f"[FEHLER] {exc}\n")
-            self.after(0, lambda msg=str(exc): messagebox.showerror("GDWH Fehler", msg))
-            self.after(0, lambda: self._gdwh_finish_fetch(False))
-            self.after(0, lambda: self._gdwh_preview_lbl.configure(
-                text="Fehler beim Laden."))
-
-    def _gdwh_show_pending_notice(self, count: int):
-        """Info-Popup nach dem Laden: weist auf frisch importierte, noch nicht
-        indexierte DataPackages hin (siehe _gdwh_is_pending/_GDWH_PENDING_HOURS).
-        Läuft nur einmal pro Ladevorgang, nicht bei jeder Filteränderung."""
-        messagebox.showinfo(
-            "Frisch importierte DataPackages",
-            f"{count} DataPackage(s) wurden erst kürzlich importiert. GDWH zeigt "
-            f"sie im Portal zwar bereits an, aktualisiert seinen FileMetadata-Index "
-            f"(Area/Jahr/Auftragstyp) aber zeitversetzt — das kann einige Stunden "
-            f"dauern.\n\n"
-            f"Diese Packages sind in der Liste mit „⏳ Frisch importiert“ markiert "
-            f"und vorerst nicht auswählbar/löschbar.\n\n"
-            f"Bitte in ein paar Stunden nochmals auf „{self._GDWH_FETCH_BTN_LABEL_DONE}“ "
-            f"klicken, um die Imports neu zu laden und den aktuellen Stand zu prüfen."
-        )
-
-    def _gdwh_toggle_leichen(self):
-        active = not self._gdwh_show_leichen_var.get()
-        self._gdwh_show_leichen_var.set(active)
-        self._gdwh_leichen_btn.config(
-            text=self._GDWH_LEICHEN_BTN_LABEL_BACK if active
-                 else self._GDWH_LEICHEN_BTN_LABEL)
-        self._gdwh_apply_filter()
-
-    def _gdwh_apply_filter(self):
-        if not hasattr(self, "_gdwh_enriched"):
-            return
-        # Drei Kategorien pro Import:
-        #   - "aktiv":   FileMetadata-Match vorhanden → normale Anzeige.
-        #   - "pending": kein Match, aber Import jünger als _GDWH_PENDING_HOURS
-        #                → GDWH hat die Attribute nur noch nicht nachindexiert,
-        #                keine Anomalie (live verifiziert 2026-08-20).
-        #   - "anomalie": kein Match und älter als _GDWH_PENDING_HOURS → GDWH
-        #                hat dafür (noch) keinen FileMetadata-Eintrag geliefert.
-        # WICHTIG: alle drei Kategorien werden in der Normalansicht IMMER
-        # angezeigt (jede reale /data/imports-Zeile bleibt sichtbar, auch ohne
-        # FileMetadata-Match – ein fehlender Match beweist nicht, dass die
-        # Daten nicht mehr in GDWH existieren, siehe Portal-Abgleich). Sie
-        # bleiben aber nicht auswählbar/löschbar (deletable erfordert match is
-        # not None, siehe _gdwh_populate_list) – nur die reine Sichtbarkeit
-        # wird hier gefixt, die Lösch-Sicherheitssperre bleibt unverändert.
-        # Der Anomalien-Toggle filtert zusätzlich auf NUR "anomalie", er
-        # blendet in der Normalansicht nichts aus.
-        leichen_mode = self._gdwh_show_leichen_var.get()
-        self._gdwh_leichen_btn.config(
-            state="normal" if self._gdwh_enriched else "disabled")
-
-        def _is_anomalie(item):
-            imp, match = item
-            return match is None and not _gdwh_is_pending(imp)
-
-        if leichen_mode:
-            base = [item for item in self._gdwh_enriched if _is_anomalie(item)]
-        else:
-            base = list(self._gdwh_enriched)
-
-        typ_filter = AUFTRAGSTYPEN.get(self._gdwh_auftragstyp_var.get(), "").strip().lower()
-        year = self._gdwh_year_filter_var.get().strip()
-        data = base
-        if typ_filter:
-            def _typ_matches(item):
-                _imp, match = item
-                auftragstyp = (match.get("auftragstyp", "") if match else "").strip().lower()
-                # Kein Match / kein Auftragstyp-Attribut (z.B. FileMetadata
-                # noch nicht angereichert): analog zum Jahresfilter unten
-                # NICHT ausblenden, sonst verschwinden Packages ohne
-                # auswertbare FileMetadata spurlos aus der gefilterten Liste.
-                if not auftragstyp:
-                    return True
-                return typ_filter in auftragstyp
-            data = [item for item in data if _typ_matches(item)]
-        if year:
-            def _year_matches(item):
-                imp, match = item
-                if match:
-                    for src in (match.get("stac_datetime", ""), match.get("year", "")):
-                        m = re.search(r"(?<!\d)(20\d{2})(?!\d)", src)
-                        if m:
-                            return m.group(1) == year
-                m = re.search(r"(?<!\d)(20\d{2})(?!\d)", gdwh_import_date(imp))
-                if m:
-                    return m.group(1) == year
-                # Kein Bucket-Match (z.B. Import-Ordner bereits geleert) und
-                # kein auswertbares importDate: Jahr unbekannt. Package trotz
-                # aktivem Jahresfilter NICHT ausblenden – sonst verschwinden
-                # tatsächlich im GDWH vorhandene Packages spurlos aus der
-                # Liste, sobald der Ingest-Bucket regelmässig geleert wurde.
-                # Wird in der Liste als "????" markiert, siehe _year_key/-
-                # _gdwh_populate_list.
-                return True
-            data = [item for item in data if _year_matches(item)]
-        area = self._gdwh_area_filter_var.get().strip()
-        if area:
-            def _area_matches(item):
-                _imp, match = item
-                area_val = (match.get("area", "") if match else "").strip()
-                # Kein Match / kein AREA-Attribut: analog zu Jahr/Auftragstyp
-                # NICHT ausblenden, sonst verschwinden Packages ohne
-                # auswertbare FileMetadata spurlos aus der gefilterten Liste.
-                if not area_val:
-                    return True
-                return area.lower() in area_val.lower()
-            data = [item for item in data if _area_matches(item)]
-        # datapackageId: jedes Import-Objekt hat eine ID, daher – anders als
-        # Jahr/AREA/Auftragstyp – kein "nicht ausblenden bei fehlendem Wert".
-        pkg_id_filter = self._gdwh_pkg_id_filter_var.get().strip().lower()
-        pkg_id_hidden = 0
-        if pkg_id_filter:
-            def _pkg_id_matches(item):
-                return pkg_id_filter in gdwh_import_id(item[0]).lower()
-            data = [item for item in data if _pkg_id_matches(item)]
-            # Treffer, die nur wegen Auftragstyp/Jahr/AREA ausgeblendet sind.
-            # Ohne diesen Hinweis sähe eine exakt eingegebene datapackageId
-            # aus wie "nicht im GDWH", obwohl sie z.B. nur zum anderen
-            # Auftragstyp gehört.
-            pkg_id_hidden = sum(1 for item in base if _pkg_id_matches(item)) - len(data)
-        self._gdwh_total_leichen = sum(
-            1 for item in self._gdwh_enriched if _is_anomalie(item))
-        self._gdwh_total_pending = sum(
-            1 for imp, match in self._gdwh_enriched
-            if match is None and _gdwh_is_pending(imp))
-        self._gdwh_populate_list(data, leichen_mode=leichen_mode,
-                                 pkg_id_hidden=pkg_id_hidden)
-
-    def _gdwh_reset_state(self):
-        # Sicherheitskritisch: bei Umgebungs- oder GDS-Key-Wechsel muss die
-        # bereits geladene DataPackage-Liste (inkl. Auswahl) sofort verworfen
-        # werden. Sonst würde eine gegen den ALTEN Kontext geladene Auswahl
-        # gegen den NEU gewählten Kontext gelöscht (_gdwh_base_url/gds_key
-        # werden bei der Löschung stets frisch/aktuell gelesen).
-        self._gdwh_enriched = []
-        self._gdwh_total_leichen = 0
-        self._gdwh_total_pending = 0
-        self._gdwh_show_leichen_var.set(False)
-        self._gdwh_leichen_btn.config(
-            text=self._GDWH_LEICHEN_BTN_LABEL, state="disabled")
-        self._gdwh_clear_list()
-        self._gdwh_del_btn.config(
-            text="Ausgewählte DataPackages löschen …", state="disabled")
-        self._gdwh_preview_lbl.configure(text="Noch keine Imports geladen.")
-        # Neuer Kontext (Umgebung/GDS-Key) = noch nichts geladen: Button auf
-        # Ausgangszustand (amber "Imports laden") zurücksetzen, sonst würde
-        # fälschlich grün "Imports geladen" stehen.
-        self._gdwh_update_fetch_ready()
-
-    def _gdwh_clear_list(self):
-        for w in self._gdwh_list_frame.winfo_children():
-            w.destroy()
-        self._gdwh_selection.clear()
-        self._gdwh_row_widgets.clear()
-
-    def _gdwh_copy_uuid(self, uuid: str, button: tk.Button):
-        """Kopiert die datapackageId in die Zwischenablage, kurzes visuelles Feedback."""
-        self.clipboard_clear()
-        self.clipboard_append(uuid)
-        orig_text = button.cget("text")
-        button.config(text="✓ Kopiert")
-        self.after(1200, lambda: button.config(text=orig_text)
-                   if button.winfo_exists() else None)
-
-    def _gdwh_populate_list(self, enriched: List[Tuple], leichen_mode: bool = False,
-                            pkg_id_hidden: int = 0):
-        self._gdwh_clear_list()
-        T = DARK if self._dark else LIGHT
-        self._gdwh_total_loaded = len(enriched)
-
-        if not enriched:
-            empty_text = ("Keine GDWH-Anomalien gefunden." if leichen_mode
-                          else "Keine DataPackages gefunden.")
-            if pkg_id_hidden:
-                empty_text += (f"  {pkg_id_hidden} DataPackage(s) mit dieser datapackageId "
-                               f"vorhanden, aber durch Auftragstyp/Jahr/AREA-Filter ausgeblendet.")
-            tk.Label(
-                self._gdwh_list_frame,
-                text=empty_text,
-                font=("Segoe UI", 9, "italic"),
-                bg=T["chk_bg"], fg=T["hint"] if pkg_id_hidden else T["fg_dim"],
-                padx=8, pady=8,
-            ).pack(anchor="w")
-            self._gdwh_preview_lbl.configure(
-                text="0 GDWH-Anomalien gefunden." if leichen_mode
-                     else "0 DataPackages gefunden.")
-            return
-
-        def _year_key(item):
-            """Sortierschlüssel: Jahr aus stac_datetime > Ordnername > importDate."""
-            imp, match = item
-            if match:
-                for src in (match.get("stac_datetime", ""), match.get("year", "")):
-                    m = re.search(r"(?<!\d)(20\d{2})(?!\d)", src)
-                    if m:
-                        return int(m.group(1))
-            m = re.search(r"(?<!\d)(20\d{2})(?!\d)", gdwh_import_date(imp))
-            return int(m.group(1)) if m else 0
-
-        for imp, match in sorted(enriched, key=_year_key, reverse=True):
-            pkg_id     = gdwh_import_id(imp)
-            pkg_date   = gdwh_import_date(imp)
-            pkg_bbox   = gdwh_import_footprint_bbox(imp)
-            pkg_status = gdwh_import_status(imp)
-            # GET /data/imports liefert in der Praxis GAR KEIN Status-Feld
-            # (nur uuid/gdsKey/importDate/footprint – per Swagger verifiziert),
-            # gdwh_import_status() liefert daher fast immer "?". Nur wenn ein
-            # ECHTER, bekannter Status zurückkommt und der NICHT "Imported"
-            # ist, sperren wir die Checkbox präventiv (DELETE würde ohnehin
-            # ablehnen, siehe Fehlermeldung "must have status 'Imported'").
-            # Bei "?" (Normalfall) gilt: löschbar, bis der server-seitige
-            # DELETE-Aufruf das Gegenteil zeigt (dann als [FAIL] im Log).
-            deletable_by_status = pkg_status == "?" or pkg_status.lower() == "imported"
-            # Ohne FileMetadata-Match ist entweder (a) der Import noch nicht
-            # indexiert ("pending", siehe _gdwh_is_pending) – dann kennen wir
-            # seine Attribute schlicht noch nicht – oder (b) er ist eine echte
-            # Anomalie und existiert vermutlich nicht mehr wirklich in GDWH
-            # (siehe _gdwh_apply_filter). In beiden Fällen sperren wir die
-            # Auswahl: bei (a) fehlen die Daten fürs sichere Löschen noch, bei
-            # (b) wäre ein DELETE ein No-Op, das GDWH trotzdem als "Erfolg"
-            # quittiert, ohne dass es etwas zu löschen gäbe.
-            pending    = match is None and _gdwh_is_pending(imp)
-            deletable  = deletable_by_status and match is not None
-
-            auftragstyp   = match.get("auftragstyp", "")  if match else ""
-            area          = match.get("area", "")          if match else ""
-            stac_datetime = match.get("stac_datetime", "") if match else ""
-            commentary    = match.get("commentary", "")    if match else ""
-
-            # Jahr für Anzeige: stac_datetime > Ordnername > importDate
-            year = ""
-            if match:
-                for src in (stac_datetime, match.get("year", "")):
-                    m = re.search(r"(?<!\d)(20\d{2})(?!\d)", src)
-                    if m:
-                        year = m.group(1)
-                        break
-            if not year:
-                m = re.search(r"(?<!\d)(20\d{2})(?!\d)", pkg_date)
-                year = m.group(1) if m else ""
-
-            area_color  = T["accent"] if area else T["fg_dim"]
-            area_suffix = ""
-
-            var = tk.BooleanVar(value=False)
-            if deletable:
-                # Nur löschbare (status == 'Imported') Packages landen in der
-                # Auswahl-Map – so können "Alle auswählen" und der Start der
-                # Löschung ein nicht mehr löschbares Package gar nicht erst
-                # erfassen, unabhängig vom (gesperrten) Checkbox-Widget.
-                var.trace_add("write", lambda *_: self._gdwh_on_checkbox_change())
-                self._gdwh_selection[pkg_id] = var
-
-            # Container für alle 4 Zeilen dieses Packages – erlaubt, die Zeile
-            # nach erfolgreicher Löschung gezielt zu entfernen (statt die ganze
-            # Liste neu zu laden), siehe _gdwh_remove_deleted_rows().
-            entry_frame = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
-            entry_frame.pack(fill="x")
-            self._gdwh_row_widgets[pkg_id] = entry_frame
-
-            # ── Zeile 1: Jahr  AREA  GDS-Key  Status ─────────────────────────
-            row1 = tk.Frame(entry_frame, bg=T["chk_bg"])
-            row1.pack(fill="x", padx=6, pady=(5, 0))
-
-            tk.Checkbutton(
-                row1, variable=var, state="normal" if deletable else "disabled",
-                bg=T["chk_bg"], fg=T["fg"], selectcolor=T["input"],
-                activebackground=T["chk_bg"], activeforeground=T["fg"],
-            ).pack(side="left")
-
-            year_display = year if year else ("NEU" if pending else "????")
-            tk.Label(
-                row1, text=year_display,
-                font=("Cascadia Mono", 9, "bold"),
-                bg=T["chk_bg"],
-                fg=T["hint"] if pending else (T["fg"] if deletable else T["fg_dim"]),
-                anchor="w", width=5,
-            ).pack(side="left")
-
-            tk.Label(
-                row1, text=(area + area_suffix) if area else pkg_id[:12] + "…",
-                font=("Cascadia Mono", 9, "bold"),
-                bg=T["chk_bg"],
-                fg=(area_color if area else T["fg_dim"]) if deletable else T["fg_dim"],
-                anchor="w",
-            ).pack(side="left")
-
-            gds_key = imp.get("gdsKey") or getattr(self, "_gdwh_current_gds_key", "")
-            file_format = match.get("file_format", "") if match else ""
-            gds_key_label = f"[{gds_key}" + (f" · {file_format}]" if file_format else "]")
-            if gds_key:
-                tk.Label(
-                    row1, text=f"    {gds_key_label}",
-                    font=("Cascadia Mono", 8),
-                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
-                ).pack(side="left")
-
-            if not deletable_by_status:
-                tk.Label(
-                    row1, text=f"    ⚠ Status: {pkg_status}  (nicht löschbar)",
-                    font=("Segoe UI", 8, "italic"),
-                    bg=T["chk_bg"], fg=T["hint"], anchor="w",
-                ).pack(side="left")
-
-            if match is None:
-                if pending:
-                    tk.Label(
-                        row1,
-                        text=f"    ⏳ Frisch importiert — Attribute (Area/Jahr) "
-                             f"folgen, sobald GDWH den Index aktualisiert hat",
-                        font=("Segoe UI", 8, "bold"),
-                        bg=T["chk_bg"], fg=T["hint"], anchor="w",
-                    ).pack(side="left")
-                else:
-                    tk.Label(
-                        row1,
-                        text=f"    ⚠ Kein FileMetadata-Match seit über "
-                             f"{_GDWH_PENDING_HOURS}h — nicht löschbar, bis "
-                             f"geklärt ist ob die Daten noch existieren",
-                        font=("Segoe UI", 8, "bold"),
-                        bg=T["chk_bg"], fg=T["err"], anchor="w",
-                    ).pack(side="left")
-
-            # ── Zeile 2 (eingerückt): Auftragstyp  StacItemIdDatetime ────────
-            row2 = tk.Frame(entry_frame, bg=T["chk_bg"])
-            row2.pack(fill="x", padx=30, pady=0)
-
-            if auftragstyp:
-                tk.Label(
-                    row2, text=auftragstyp,
-                    font=("Cascadia Mono", 8, "bold"),
-                    bg=T["chk_bg"], fg=T["ok"], anchor="w",
-                ).pack(side="left")
-
-            if stac_datetime:
-                tk.Label(
-                    row2, text=("    " if auftragstyp else "") + stac_datetime,
-                    font=("Segoe UI", 8),
-                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
-                ).pack(side="left")
-            elif not auftragstyp and pkg_bbox:
-                tk.Label(
-                    row2, text=pkg_bbox,
-                    font=("Segoe UI", 8),
-                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
-                ).pack(side="left")
-
-            # ── Zeile 3 (eingerückt): Commentary  Import-Datum ──────────────
-            row3 = tk.Frame(entry_frame, bg=T["chk_bg"])
-            row3.pack(fill="x", padx=30, pady=0)
-
-            parts3 = []
-            if commentary:
-                parts3.append(commentary)
-            parts3.append(pkg_date)
-
-            tk.Label(
-                row3, text="   ·   ".join(parts3),
-                font=("Segoe UI", 8),
-                bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
-            ).pack(side="left")
-
-            # ── Zeile 4 (eingerückt): datapackageId + Kopieren ──────────────
-            # Für JEDES Package (nicht nur pending/Anomalie): die ID ist der
-            # eindeutige Nachweis, welches DataPackage importiert wurde, und
-            # genau diese ID geht beim Löschen an DELETE /data/imports/{id}.
-            row4 = tk.Frame(entry_frame, bg=T["chk_bg"])
-            row4.pack(fill="x", padx=30, pady=(0, 3))
-
-            tk.Label(
-                row4, text=f"datapackageId: {pkg_id}",
-                font=("Cascadia Mono", 8),
-                bg=T["chk_bg"], fg=T["fg"] if deletable else T["fg_dim"], anchor="w",
-            ).pack(side="left")
-
-            copy_btn = tk.Button(
-                row4, text="⧉ Kopieren", font=("Segoe UI", 7),
-                bg=T["btn"], fg=T["fg"], relief="flat",
-                padx=4, pady=0, cursor="hand2",
-            )
-            copy_btn.config(
-                command=lambda uuid=pkg_id, b=copy_btn: self._gdwh_copy_uuid(uuid, b))
-            copy_btn.pack(side="left", padx=(6, 0))
-
-        # Fetch-Button wird hier bewusst NICHT angefasst (siehe
-        # _gdwh_finish_fetch): diese Methode läuft auch bei jedem Filterwechsel
-        # und würde den Button sonst mitten in einem Lade-/Löschvorgang
-        # wieder aktivieren bzw. fälschlich grün setzen.
-        st = "normal" if (enriched and not leichen_mode) else "disabled"
-        self._gdwh_sel_all_btn.config(state=st)
-        self._gdwh_sel_none_btn.config(state=st)
-        self._gdwh_on_checkbox_change()
-        self._apply_theme(self._dark)
-
-    def _gdwh_on_checkbox_change(self):
-        self._gdwh_update_preview()
-
-    def _gdwh_select_all(self):
-        for var in self._gdwh_selection.values():
-            var.set(True)
-
-    def _gdwh_deselect_all(self):
-        for var in self._gdwh_selection.values():
-            var.set(False)
-
-    def _gdwh_update_preview(self):
-        total        = getattr(self, "_gdwh_total_loaded", len(self._gdwh_selection))
-        leichen_mode = self._gdwh_show_leichen_var.get()
-        total_leichen = getattr(self, "_gdwh_total_leichen", 0)
-        total_pending = getattr(self, "_gdwh_total_pending", 0)
-
-        if leichen_mode:
-            self._gdwh_preview_lbl.configure(
-                text=f"{total} GDWH-Anomalie(n) — seit über {_GDWH_PENDING_HOURS}h "
-                     f"ohne FileMetadata-Match (Filter auf diese Kategorie). "
-                     f"Nicht auswählbar/löschbar, bis der Match geklärt ist."
-            )
-            self._gdwh_del_btn.config(
-                text="Ausgewählte DataPackages (0) löschen …", state="disabled")
-            self._apply_theme(self._dark)
-            return
-
-        deletable    = len(self._gdwh_selection)
-        selected     = sum(v.get() for v in self._gdwh_selection.values())
-        # total - deletable enthält status-gesperrte, pending (noch nicht
-        # indexierte) UND Anomalie-Packages (kein FileMetadata-Match) – beide
-        # Kategorien werden separat ausgewiesen, damit "gesperrt (Status ≠
-        # Imported)" nicht fälschlich auf frische Importe oder Anomalien
-        # zutrifft, die aus anderen Gründen (noch) nicht löschbar sind.
-        locked_status = total - deletable - total_pending - total_leichen
-        locked_note  = f"  |  {locked_status} gesperrt (Status ≠ Imported)" \
-                       if locked_status > 0 else ""
-        pending_note = f"  |  {total_pending} frisch importiert, noch nicht indexiert" \
-                        if total_pending else ""
-        leichen_note = f"  |  {total_leichen} ohne FileMetadata-Match, nicht löschbar " \
-                        f"(Button „{self._GDWH_LEICHEN_BTN_LABEL}“ zum Filtern)" \
-                        if total_leichen else ""
-        self._gdwh_preview_lbl.configure(
-            text=f"{total} DataPackage(s) geladen  |  {selected} ausgewählt zum Löschen"
-                 f"{locked_note}{pending_note}{leichen_note}"
-        )
-        self._gdwh_del_btn.config(
-            text=f"Ausgewählte DataPackages ({selected}) löschen …",
-            state="normal" if selected > 0 else "disabled",
-        )
-        self._apply_theme(self._dark)
-
-    # ── GDWH Löschung ─────────────────────────────────────────────────────────
-
-    def _gdwh_start_deletion(self):
-        selected = {
-            pkg_id: var.get()
-            for pkg_id, var in self._gdwh_selection.items()
-            if var.get()
-        }
-        if not selected:
-            messagebox.showwarning("Nichts ausgewählt", "Keine DataPackages ausgewählt.")
-            return
-
-        gds_key = self._gdwh_gds_key_var.get().strip()
-        env     = self._gdwh_env_var.get()
-        email   = self._gdwh_email_var.get().strip()
-
-        dlg = GDWHConfirmDialog(self, env, gds_key, len(selected), self._dark)
-        if not dlg.result:
-            self._gdwh_log_write("[Abbruch] Löschung durch Benutzer abgebrochen.\n")
-            return
-
-        self._gdwh_del_btn.config(state="disabled")
-        self._gdwh_fetch_btn.config(state="disabled")
-        self._set_gdwh_env_controls_locked(True)
-        self._gdwh_progress["maximum"] = len(selected)
-        self._gdwh_progress["value"]   = 0
-        self._gdwh_status_lbl.configure(text="Lösche …")
-        self._apply_theme(self._dark)
-
-        # base_url JETZT einfrieren (siehe _start_deletion für STAC): GDWH hat
-        # keinen Credentials-Schritt, ein Umgebungs-Radiobutton würde
-        # self._gdwh_base_url sonst live mitten in der Löschung ändern.
-        base_url = self._gdwh_base_url
-        threading.Thread(
-            target=self._gdwh_delete_worker,
-            args=(list(selected.keys()), gds_key, email, base_url),
-            daemon=True,
-        ).start()
-
-    def _gdwh_delete_worker(self, pkg_ids: List[str], gds_key: str, email: str,
-                             base_url: str):
-        ok_list   = []
-        fail_list = []
-        ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        env       = self._gdwh_env_var.get()
-
-        # Metadaten aus ausgewählten Packages für Log-Dateiname und Protokoll
-        enriched_map = {gdwh_import_id(imp): (imp, match)
-                        for imp, match in getattr(self, "_gdwh_enriched", [])}
-        sel_enriched = [enriched_map[pid] for pid in pkg_ids if pid in enriched_map]
-
-        _yrs, _ars, _dts, _typs = [], [], [], []
-        for imp, match in sel_enriched:
-            year_found = False
-            if match:
-                for src in (match.get("stac_datetime", ""), match.get("year", "")):
-                    m = re.search(r"(?<!\d)(20\d{2})(?!\d)", src)
-                    if m:
-                        y = m.group(1)
-                        if y not in _yrs:
-                            _yrs.append(y)
-                        year_found = True
-                        break
-                if match.get("area") and match["area"] not in _ars:
-                    _ars.append(match["area"])
-                if match.get("stac_datetime") and match["stac_datetime"] not in _dts:
-                    _dts.append(match["stac_datetime"])
-                if match.get("auftragstyp") and match["auftragstyp"] not in _typs:
-                    _typs.append(match["auftragstyp"])
-            if not year_found:
-                m = re.search(r"(?<!\d)(20\d{2})(?!\d)", gdwh_import_date(imp))
-                if m and m.group(1) not in _yrs:
-                    _yrs.append(m.group(1))
-
-        meta_year        = _yrs[0] if len(_yrs) == 1 else ("multi" if _yrs else "unbekannt")
-        meta_area        = _ars[0] if len(_ars) == 1 else ("multi" if _ars else "unbekannt")
-        # Für Logausgabe (nicht Dateiname): alle betroffenen Areas einzeln
-        # auflisten statt zu "multi" zusammenzufassen – sonst ist im Log
-        # nicht mehr nachvollziehbar, welche Areas tatsächlich gelöscht wurden.
-        meta_area_full   = ", ".join(_ars) if _ars else "unbekannt"
-        meta_stac_dt     = _dts[0] if len(_dts) == 1 else (f"multi_{len(pkg_ids)}" if _dts else "")
-        meta_auftragstyp = _typs[0] if _typs else ""
-
-        # Dateiname bewusst mit dem kompakten meta_area (ggf. "multi"), sonst
-        # würde ein Dateiname bei vielen Areas unhandlich lang.
-        session_logger = self._make_session_logger("GDWH", env, meta_year, meta_area, meta_stac_dt)
-
-        self._gdwh_log_write(
-            f"\n{'='*60}\n[{ts}] GDWH LÖSCHUNG GESTARTET\n{'='*60}\n"
-            f"Umgebung:        {env}\n"
-            f"GDS-Key:         {gds_key}\n"
-            f"Auftragstyp:     {meta_auftragstyp or '(unbekannt)'}\n"
-            f"Jahr:            {meta_year}\n"
-            f"AREA:            {meta_area_full}\n"
-            f"STAC-Datetime:   {meta_stac_dt or '(unbekannt)'}\n"
-            f"Packages:        {len(pkg_ids)}\n"
-            f"E-Mail:          {email or '(keine)'}\n\n"
-        )
-        session_logger.info(
-            f"[GDWH START] {env} | {gds_key} | Auftragstyp: {meta_auftragstyp} | "
-            f"Jahr: {meta_year} | AREA: {meta_area_full} | StacDatetime: {meta_stac_dt} | "
-            f"Packages: {len(pkg_ids)}")
-
-        # Area/GDS-Key je Package für die Einzelzeilen (OK/FAIL) unten
-        # nachschlagbar. Der GDS-Key kommt bewusst aus dem geladenen Import
-        # (imp["gdsKey"]) statt aus dem einen Dropdown-Wert: bei "Alle GDS"
-        # steht dort nur das Sentinel, und jedes Package muss beim DELETE-
-        # Aufruf mit seinem tatsächlichen GDS-Key adressiert werden.
-        area_by_pkg = {pid: ((m.get("area", "") if m else "") or "unbekannt")
-                       for pid, (_imp, m) in enriched_map.items()}
-        gds_key_by_pkg = {pid: (imp.get("gdsKey") or gds_key)
-                          for pid, (imp, _m) in enriched_map.items()}
-
-        unclear_list = []  # Jobs ohne eindeutigen Endstatus nach Timeout (siehe unten)
-
-        # Phase 1: ALLE Lösch-Jobs zuerst starten (statt pro Package erst auf
-        # den vorherigen Job zu warten) – die Jobs laufen serverseitig
-        # asynchron/unabhängig voneinander, serielles Warten würde eine
-        # Batch-Löschung unnötig auf die Summe aller Einzel-Laufzeiten
-        # aufblähen statt auf die längste.
-        job_id_by_pkg: Dict[str, str] = {}
-        for pkg_id in pkg_ids:
-            pkg_area    = area_by_pkg.get(pkg_id, "unbekannt")
-            pkg_gds_key = gds_key_by_pkg.get(pkg_id, gds_key)
-            try:
-                job = gdwh_delete_import(base_url, pkg_gds_key, pkg_id, email)
-                job_id = job.get("id", "?")
-                job_id_by_pkg[pkg_id] = job_id
-                self._gdwh_log_write(
-                    f"  Löschjob gestartet: {pkg_id}  |  GDS-Key: {pkg_gds_key}"
-                    f"  |  Area: {pkg_area}  |  Job-ID: {job_id}\n")
-                session_logger.info(
-                    f"[GDWH JOB START] {env}/{pkg_gds_key}/{pkg_id}  Area: {pkg_area}  Job: {job_id}")
-            except Exception as exc:
-                self._gdwh_log_write(
-                    f"  [FAIL] Package: {pkg_id}  |  GDS-Key: {pkg_gds_key}"
-                    f"  |  Area: {pkg_area}  →  {exc}\n")
-                session_logger.warning(
-                    f"[GDWH FAIL] {env}/{pkg_gds_key}/{pkg_id}  Area: {pkg_area}  →  {exc}")
-                fail_list.append(pkg_id)
-
-        # Phase 2: alle gestarteten Jobs interleaved pollen (GET /api/jobs/
-        # {jobId}), statt den DELETE-Request selbst als "erledigt" zu werten
-        # – jeder Job läuft serverseitig asynchron weiter.
-        done_count = [0]
-
-        def _on_poll(_pkg_id, job):
-            status = str(job.get("status", "")).strip().lower()
-            if status in GDWH_JOB_STATUS_SUCCESS or status in GDWH_JOB_STATUS_FAILURE:
-                done_count[0] += 1
-                self.after(0, lambda v=done_count[0]: self._gdwh_progress.configure(value=v))
-            self.after(0, lambda: self._gdwh_status_lbl.configure(
-                text=f"Warte auf GDWH-Jobs … {done_count[0]}/{len(job_id_by_pkg)} abgeschlossen"))
-
-        final_jobs = gdwh_wait_for_jobs(
-            base_url, job_id_by_pkg,
-            timeout=_GDWH_JOB_POLL_TIMEOUT, interval=_GDWH_JOB_POLL_INTERVAL,
-            on_poll=_on_poll,
-        ) if job_id_by_pkg else {}
-
-        # Phase 3: Ergebnis je Package auswerten; Bucket-Cleanup NUR nach
-        # bestätigtem Job-Erfolg (sonst würde ein noch laufender Lösch-Job
-        # durch den Cleanup-Aufruf gestört – siehe Kommentar unten).
-        for pkg_id, job_id in job_id_by_pkg.items():
-            pkg_area    = area_by_pkg.get(pkg_id, "unbekannt")
-            pkg_gds_key = gds_key_by_pkg.get(pkg_id, gds_key)
-            final_job    = final_jobs.get(pkg_id, {})
-            final_status = str(final_job.get("status", "")).strip().lower()
-
-            if final_status in GDWH_JOB_STATUS_FAILURE:
-                result = final_job.get("result") or final_job.get("log") or ""
-                self._gdwh_log_write(
-                    f"  [FAIL] Job meldet Fehlschlag: {pkg_id}  |  Status: {final_status}"
-                    f"  →  {result}\n")
-                session_logger.warning(
-                    f"[GDWH JOB FAILED] {env}/{pkg_gds_key}/{pkg_id}  Job: {job_id}  →  {result}")
-                fail_list.append(pkg_id)
-                continue
-
-            if final_status not in GDWH_JOB_STATUS_SUCCESS:
-                self._gdwh_log_write(
-                    f"  [UNKLAR] Job noch nicht abgeschlossen nach "
-                    f"{_GDWH_JOB_POLL_TIMEOUT:.0f}s: {pkg_id}  |  letzter Status: "
-                    f"{final_job.get('status', '?')}  |  Abschluss/Bucket-Aufräumen bitte "
-                    f"manuell per E-Mail/GDWH-Portal prüfen.\n")
-                session_logger.warning(
-                    f"[GDWH JOB TIMEOUT] {env}/{pkg_gds_key}/{pkg_id}  Job: {job_id}  "
-                    f"letzter Status: {final_job.get('status', '?')}")
-                unclear_list.append(pkg_id)
-                continue
-
-            self._gdwh_log_write(
-                f"  [OK]  Job erfolgreich abgeschlossen: {pkg_id}  |  Status: "
-                f"{final_job.get('status', '?')}\n")
-            session_logger.info(
-                f"[GDWH OK] {env}/{pkg_gds_key}/{pkg_id}  Area: {pkg_area}  Job: {job_id}")
-            ok_list.append(pkg_id)
-
-            # Bucket aufräumen: falls noch ein DataPackage-Ordner mit
-            # derselben ID im Ingest-Bucket liegt (Import erfolgt, aber nie
-            # aufgeräumt), jetzt zusätzlich löschen – sonst bleibt das
-            # Package im GDWH-Portal als "hängendes" DataPackage sichtbar
-            # und blockiert einen sauberen Neu-Import.
-            try:
-                cleaned = gdwh_cleanup_data_package(base_url, pkg_gds_key, pkg_id)
-                if cleaned is not None:
-                    self._gdwh_log_write(
-                        "        Bucket-DataPackage ebenfalls gelöscht.\n")
-                    session_logger.info(
-                        f"[GDWH BUCKET CLEANUP OK] {env}/{pkg_gds_key}/{pkg_id}")
-            except Exception as cleanup_exc:
-                self._gdwh_log_write(
-                    f"        [WARNUNG] Bucket-DataPackage konnte nicht "
-                    f"gelöscht werden: {cleanup_exc}\n")
-                session_logger.warning(
-                    f"[GDWH BUCKET CLEANUP FAIL] {env}/{pkg_gds_key}/{pkg_id}  "
-                    f"→  {cleanup_exc}")
-
-        ts2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._gdwh_log_write(
-            f"\n{'='*60}\n[{ts2}] ABGESCHLOSSEN\n"
-            f"  Erfolgreich bestätigt: {len(ok_list)}\n"
-            f"  Fehlgeschlagen:        {len(fail_list)}\n"
-            f"  Status unklar/Timeout: {len(unclear_list)}\n"
-            f"{'='*60}\n"
-        )
-        session_logger.info(
-            f"[GDWH END] OK: {len(ok_list)} | FAIL: {len(fail_list)} | "
-            f"UNKLAR: {len(unclear_list)}")
-
-        note = ""
-        if unclear_list:
-            note = ("\n\nHinweis: Bei manchen Packages konnte der Job-Abschluss nicht "
-                     f"innert {_GDWH_JOB_POLL_TIMEOUT:.0f}s bestätigt werden – Status bitte "
-                     "per E-Mail-Benachrichtigung oder im GDWH-Portal prüfen.")
-        elif ok_list and not email:
-            note = "\n\nHinweis: Ohne E-Mail-Adresse keine zusätzliche Abschluss-Benachrichtigung."
-
-        self.after(0, lambda: self._gdwh_progress.configure(value=len(pkg_ids)))
-        self.after(0, lambda: self._gdwh_status_lbl.configure(
-            text=f"Fertig: {len(ok_list)} OK  /  {len(fail_list)} Fehler  /  "
-                 f"{len(unclear_list)} unklar"))
-        self.after(0, lambda: self._gdwh_fetch_btn.config(state="normal"))
-        self.after(0, lambda: self._set_gdwh_env_controls_locked(False))
-        self.after(0, lambda: self._gdwh_remove_deleted_rows(ok_list))
-        self.after(0, lambda: messagebox.showinfo(
-            "GDWH Löschung abgeschlossen",
-            f"Erfolgreich bestätigt: {len(ok_list)}\n"
-            f"Fehlgeschlagen:        {len(fail_list)}\n"
-            f"Status unklar/Timeout: {len(unclear_list)}"
-            f"{note}",
-        ))
-
-    def _gdwh_remove_deleted_rows(self, ok_pkg_ids: List[str]):
-        """Entfernt erfolgreich zum Löschen eingereichte Packages aus der
-        Liste UND aus _gdwh_enriched/_gdwh_imports, damit ein späterer
-        Jahres-Filterwechsel (_gdwh_apply_filter() ruft _gdwh_populate_list()
-        erneut auf) sie nicht aus den noch alten Rohdaten wieder aufleben
-        lässt. Die GDWH-Löschung läuft serverseitig asynchron (Job) – ein
-        erneutes Anzeigen/Anklicken hier wäre ohnehin nur ein redundanter
-        zweiter Löschauftrag auf dasselbe Package."""
-        ok_ids = set(ok_pkg_ids)
-        if not ok_ids:
-            return
-        for pkg_id in ok_ids:
-            w = self._gdwh_row_widgets.pop(pkg_id, None)
-            if w is not None:
-                w.destroy()
-            self._gdwh_selection.pop(pkg_id, None)
-
-        if hasattr(self, "_gdwh_enriched"):
-            self._gdwh_enriched = [
-                (imp, match) for imp, match in self._gdwh_enriched
-                if gdwh_import_id(imp) not in ok_ids
-            ]
-        self._gdwh_imports = [
-            imp for imp in self._gdwh_imports if gdwh_import_id(imp) not in ok_ids
-        ]
-
-        self._gdwh_update_preview()
-
-    # ═══════════════════════════════════════════════════════════════════════════
     # Hilfsfunktionen
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -3183,19 +2025,6 @@ class KryDeleteApp(tk.Tk):
         for rb in self._env_radios:
             rb.config(state=state)
         self._cred_btn.config(state=state)
-
-    def _set_gdwh_env_controls_locked(self, locked: bool):
-        # Analog zu _set_env_controls_locked(): GDWH hat keinen separaten
-        # "Credentials laden"-Schritt (SSPI läuft transparent) – ein Klick auf
-        # den Umgebungs-Radiobutton würde self._gdwh_base_url sonst SOFORT
-        # ändern, auch mitten in einer laufenden Löschung. GDS-Key ebenso
-        # sperren, da eine laufende Löschung an einen fest eingefrorenen
-        # GDS-Key gebunden ist (siehe _gdwh_start_deletion).
-        state = "disabled" if locked else "normal"
-        for rb in self._gdwh_env_radios:
-            rb.config(state=state)
-        self._gdwh_gds_combo.config(
-            state="disabled" if locked else "readonly")
 
     def _set_busy(self, busy: bool):
         state = "disabled" if busy else ("normal" if self._auth else "disabled")
@@ -3236,14 +2065,6 @@ class KryDeleteApp(tk.Tk):
             self._log.insert("end", text)
             self._log.see("end")
             self._log.configure(state="disabled")
-        self.after(0, _do)
-
-    def _gdwh_log_write(self, text: str):
-        def _do():
-            self._gdwh_log.configure(state="normal")
-            self._gdwh_log.insert("end", text)
-            self._gdwh_log.see("end")
-            self._gdwh_log.configure(state="disabled")
         self.after(0, _do)
 
 
